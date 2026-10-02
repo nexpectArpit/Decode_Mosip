@@ -126,24 +126,56 @@ export class VerifyService {
       }
       verifiedClaims = mdocResult.claims;
     } else {
-      // W3C JSON-LD VC
-      const w3cResult: W3CVerificationResult = W3CVCProtocol.verifyCredential(
-        vcPayload,
-        issuerPublicKey
-      );
+      // W3C JSON-LD VC — Invoke Live Inji Verify Service
+      let liveVerifyHandled = false;
+      try {
+        const verifyRes = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },
+          body: typeof vcPayload === 'string' ? vcPayload : JSON.stringify(vcPayload)
+        });
 
-      isValid = w3cResult.valid;
-      if (!isValid) {
-        if (!w3cResult.signatureValid) {
-          actualStatus = 'TAMPERED';
-        } else if (!w3cResult.notExpired) {
-          actualStatus = 'EXPIRED';
-        } else {
-          actualStatus = 'INVALID';
+        if (verifyRes.ok) {
+          const directResult: any = await verifyRes.json();
+          liveVerifyHandled = true;
+          if (directResult.verificationStatus === 'SUCCESS') {
+            isValid = true;
+            actualStatus = 'VALID';
+            diagnosticMessage = 'Inji Verify Service verified Ed25519Signature2020 proof and W3C data model successfully.';
+            verifiedClaims = vcPayload.credentialSubject || {};
+          } else {
+            isValid = false;
+            // Check if expired
+            const isExpired = vcPayload.expirationDate && new Date(vcPayload.expirationDate).getTime() < Date.now();
+            actualStatus = isExpired ? 'EXPIRED' : 'TAMPERED';
+            diagnosticMessage = isExpired
+              ? 'Inji Verify Service rejected credential: Expired validity period.'
+              : 'Inji Verify Service rejected credential: Cryptographic signature failed or claims modified.';
+          }
         }
-        diagnosticMessage = w3cResult.errorMessage;
+      } catch (err: any) {
+        console.warn('[VerifyService] Inji Verify network call error, falling back to local crypto engine:', err.message);
       }
-      verifiedClaims = w3cResult.claims;
+
+      if (!liveVerifyHandled) {
+        const w3cResult: W3CVerificationResult = W3CVCProtocol.verifyCredential(
+          vcPayload,
+          issuerPublicKey
+        );
+
+        isValid = w3cResult.valid;
+        if (!isValid) {
+          if (!w3cResult.signatureValid) {
+            actualStatus = 'TAMPERED';
+          } else if (!w3cResult.notExpired) {
+            actualStatus = 'EXPIRED';
+          } else {
+            actualStatus = 'INVALID';
+          }
+          diagnosticMessage = w3cResult.errorMessage;
+        }
+        verifiedClaims = w3cResult.claims;
+      }
     }
 
     const result: VerificationResultPayload = {

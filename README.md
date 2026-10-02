@@ -95,31 +95,36 @@ Demonstrates defensive posture and security edge-case handling by injecting deli
 - **Docker & Docker Compose** (running)
 - **Node.js 18+** & **npm**
 
-### Option A: One-Command Automated Launch
-Run the automated launcher script from the `playground/` folder:
+### Option A: Clean Machine Automated Launch (Recommended)
+Run the automated setup script from the `playground/` directory. It will clone the upstream `inji-certify` repository (tag `v0.14.0`), apply the required Spring Boot and TLS patches, generate SSL certificates with SAN, and boot the entire Docker Compose stack:
 ```bash
-chmod +x start.sh
+./setup-inji-stack.sh
+```
+
+Once the upstream containers are healthy, launch the playground:
+```bash
 ./start.sh
 ```
 
 ### Option B: Manual Step-by-Step Launch
 
-#### 1. Start Baseline MOSIP Stack (if not already running)
+#### 1. Setup Upstream Inji Stack
+If you have an existing clone of `inji-certify`:
 ```bash
-cd ~/mosip-repos/inji-certify/docker-compose/docker-compose-injistack
-docker compose up -d
+# Target directory can be any path, e.g. ~/mosip-repos/inji-certify or ./inji-certify
+./setup-inji-stack.sh --dir ./inji-certify
 ```
-Verify all 6 containers are healthy:
-- `certify` (`:8090`)
-- `certify-nginx` (`:8091`)
-- `mimoto-service` (`:8099`)
-- `inji-web` (`:3004`)
-- `verify-service` (`:8095`)
-- `database` (`:5433`)
+Verify all 6 upstream containers are running:
+- `certify` (`:8090` / `v1/certify`) — OpenID4VCI draft 13 Issuer
+- `certify-nginx` (`:8091` HTTP, `:8443` HTTPS) — Reverse proxy & `did:web` host
+- `verify-service` (`:8095`) — Inji Verify VC Verification engine
+- `mimoto-service` (`:8099`) — Inji Wallet BFF
+- `inji-web` (`:3004`) — Inji Web Wallet frontend
+- `database` (`:5433`) — Postgres DB for Certify & Mimoto
 
 #### 2. Start Playground Backend
 ```bash
-cd /Users/arpittripathi/Desktop/decodeMosip/playground/backend
+cd backend
 npm install
 npm run build
 npm start
@@ -128,7 +133,7 @@ npm start
 
 #### 3. Start Playground UI
 ```bash
-cd /Users/arpittripathi/Desktop/decodeMosip/playground/frontend
+cd frontend
 npm install
 npm run dev -- --host --port 5173
 ```
@@ -140,7 +145,7 @@ npm run dev -- --host --port 5173
 
 Run the headless command-line matrix test runner to execute all happy-path and tamper test combinations:
 ```bash
-cd /Users/arpittripathi/Desktop/decodeMosip/playground/backend
+cd backend
 npm run test:matrix
 ```
 
@@ -195,15 +200,27 @@ npm run test:matrix
 
 ---
 
-## Discovered Interoperability Gaps
+## Discovered Interoperability Gaps & Upstream Inji Bugs
 
-During development, our team identified and resolved **4 real-world interoperability gaps and bugs** in the baseline Inji stack:
-1. **Hardcoded Ephemeral Ngrok DID in DB**: Fixed in `certify_init.sql` by re-pointing to `did:web:certify-nginx`.
-2. **Offline Boot Failure (CBEFF XSD Dependency)**: Localized `mosip-cbeff.xsd` behind Nginx to enable air-gapped development.
-3. **Spring Cloud LoadBalancer Feign Interception**: Disabled ribbon interception to allow internal Docker container resolution.
-4. **OpenID4VP Mobile QR Payload Bloat**: Implemented `request_uri` by reference pattern to keep QR payloads under 120 bytes.
+During development and end-to-end integration against upstream `inji-certify` v0.14.0 and `inji-verify-service` v0.17.0, our team identified and resolved **5 critical bugs and configuration gaps** in the baseline upstream repositories (automated by `setup-inji-stack.sh`):
 
-*Detailed bug analysis, root causes, and PR recommendations are documented in [`docs/interoperability-gaps-and-bugs.md`](docs/interoperability-gaps-and-bugs.md).*
+1. **Spring Cache Configuration Gap (`credentialOfferCache`)**:
+   - *Bug*: In `certify-default.properties`, `mosip.certify.cache.names` omitted `credentialOfferCache`. Creating pre-authorized offers crashed with `Cannot find cache named 'credentialOfferCache' for Builder[...]`.
+   - *Fix*: Added `credentialOfferCache` to `mosip.certify.cache.names`.
+2. **OAuth Access Token JWKS Mismatch (Collab Cloud vs Local Docker)**:
+   - *Bug*: In `certify-default.properties`, `mosip.certify.authn.jwk-set-uri` pointed to external `https://collab.mosip.net/.../jwks.json`. Issuing tokens locally succeeded, but `/issuance/credential` rejected them with HTTP 401 Unauthorized because the signature was verified against external cloud keys.
+   - *Fix*: Configured `mosip.certify.authn.jwk-set-uri=http://certify:8090/v1/certify/.well-known/jwks.json` to resolve local keypairs.
+3. **Data Provider Plugin Configuration (`PreAuthDataProviderPlugin`)**:
+   - *Bug*: Default `certify-csvdp-farmer.properties` mapped to `MockCSVDataProviderPlugin`, requiring static CSV entries.
+   - *Fix*: Enabled `mosip.certify.integration.data-provider-plugin=PreAuthDataProviderPlugin` to allow dynamic issuance of requested subject claims via Pre-Authorized Code flow.
+4. **W3C `did:web` Inji Verify Strict HTTPS & SAN Requirement**:
+   - *Bug*: Inji Verify's `DidWebPublicKeyResolver` strictly requires HTTPS on port 443 with Subject Alternative Names matching the hostname (`certify-nginx`). HTTP endpoints or non-SAN certificates are rejected with PKIX trust failures.
+   - *Fix*: Generated TLS certificates with SAN (`DNS:certify-nginx,DNS:localhost`), configured Nginx on `:443`, and mounted the CA certificate into `verify-service` with `USE_SYSTEM_CA_CERTS=true`.
+5. **Hardcoded Ephemeral Ngrok DID in DB**:
+   - *Bug*: Base SQL seeded an ephemeral ngrok domain (`did:web:xxx.ngrok.app`).
+   - *Fix*: Re-pointed issuer records in `certify_init.sql` to `did:web:certify-nginx`.
+
+*Detailed bug analysis, root causes, and patch implementations are automated in [`setup-inji-stack.sh`](setup-inji-stack.sh) and documented in [`docs/interoperability-gaps-and-bugs.md`](docs/interoperability-gaps-and-bugs.md).*
 
 ---
 

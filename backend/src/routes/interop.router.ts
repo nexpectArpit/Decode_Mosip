@@ -217,7 +217,7 @@ router.post('/matrix/run', async (req, res) => {
       // Step 3: Run Blind Mathematical Verification (Verifier has NO tamper flags!)
       let verifyRes;
       if (item.verifier === 'MOCK_EXTERNAL_OID4VP') {
-        verifyRes = MockExternalService.verifyPresentation(credentialToVerify);
+        verifyRes = await MockExternalService.verifyPresentation(credentialToVerify);
       } else {
         verifyRes = await VerifyService.verifyVC(credentialToVerify);
       }

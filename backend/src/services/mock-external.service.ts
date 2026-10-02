@@ -6,6 +6,7 @@ import { W3CVCProtocol, W3CCredential, W3CVerificationResult } from '../protocol
 import { ProtocolInspector } from '../middleware/inspector';
 import { CredentialFormat } from '../types';
 import { CertifyService } from './certify.service';
+import { VerifyService } from './verify.service';
 
 export class MockExternalService {
   // Deterministic seed for External Mock Issuer so DID and key remain consistent
@@ -213,7 +214,7 @@ export class MockExternalService {
    * Verifies an incoming presentation WITHOUT receiving any simulated tamper parameter.
    * Performs actual cryptographic signature, digest, and temporal checks!
    */
-  public static verifyPresentation(presentedCredential: any): any {
+  public static async verifyPresentation(presentedCredential: any): Promise<any> {
     const start = Date.now();
     const format: CredentialFormat = presentedCredential.format || 'ldp_vc';
 
@@ -229,16 +230,22 @@ export class MockExternalService {
       status: 200
     });
 
+    const issuerDid: string = presentedCredential.issuer || '';
+    if (issuerDid.includes('certify-nginx') || presentedCredential.issuerImplementation === 'INJI_CERTIFY') {
+      const liveVerifyRes = await VerifyService.verifyVC(presentedCredential);
+      return {
+        ...liveVerifyRes,
+        verifier: 'MOCK_EXTERNAL_OID4VP',
+        durationMs: Date.now() - start
+      };
+    }
+
     let isValid = false;
     let actualStatus: 'VALID' | 'INVALID' | 'EXPIRED' | 'TAMPERED' = 'VALID';
     let errorMessage: string | undefined;
     let verifiedClaims: Record<string, any> = {};
 
-    const issuerDid: string = presentedCredential.issuer || '';
     let issuerPublicKey = this.issuerKeyPair.publicKeyObject;
-    if (issuerDid.includes('certify-nginx') || presentedCredential.issuerImplementation === 'INJI_CERTIFY') {
-      issuerPublicKey = CertifyService.keyPair.publicKeyObject;
-    }
 
     if (format === 'vc+sd-jwt' && presentedCredential.combinedSDJWT) {
       // Real SD-JWT cryptographic verification

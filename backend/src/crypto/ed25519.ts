@@ -17,6 +17,7 @@ export class Ed25519Crypto {
   /**
    * Generates a genuine cryptographically secure Ed25519 keypair.
    */
+  
   public static generateKeyPair(): Ed25519KeyPair {
     const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
 

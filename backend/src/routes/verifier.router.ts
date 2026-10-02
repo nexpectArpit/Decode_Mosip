@@ -50,7 +50,7 @@ router.post('/verify-vc', async (req, res) => {
     // Step 2: Pass mutated credential BLINDLY to the verifier.
     // The verifier does NOT receive any tamper parameter!
     if (verifierImplementation === 'MOCK_EXTERNAL_OID4VP') {
-      const result = MockExternalService.verifyPresentation(credentialToSubmit);
+      const result = await MockExternalService.verifyPresentation(credentialToSubmit);
       return res.json(result);
     }
 
