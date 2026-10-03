@@ -1,4 +1,3 @@
-import fetch from 'node-fetch';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -6,7 +5,7 @@ const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:4000';
 
 async function runCliMatrix() {
   console.log('\n===============================================================');
-  console.log('  MOSIP Decode 2026 — Interoperability Playground Test Runner   ');
+  console.log('  MOSIP Decode 2026 — Inji Interop Lab Test Runner              ');
   console.log('  Problem Statement #2: Automated Matrix & Normative Audit     ');
   console.log('===============================================================\n');
 

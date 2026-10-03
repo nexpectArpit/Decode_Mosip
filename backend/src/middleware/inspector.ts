@@ -19,8 +19,12 @@ export class ProtocolInspectorStore {
 
   public getLogs(protocol?: string, actor?: string): ProtocolLogEntry[] {
     return this.logs.filter(l => {
-      if (protocol && l.protocol !== protocol) return false;
-      if (actor && l.actor !== actor) return false;
+      if (protocol && protocol !== 'ALL') {
+        const normFilter = protocol.toLowerCase().replace(/[_\s-]/g, '');
+        const normLog = (l.protocol || '').toLowerCase().replace(/[_\s-]/g, '');
+        if (!normLog.includes(normFilter) && !normFilter.includes(normLog)) return false;
+      }
+      if (actor && actor !== 'ALL' && l.actor !== actor) return false;
       return true;
     });
   }

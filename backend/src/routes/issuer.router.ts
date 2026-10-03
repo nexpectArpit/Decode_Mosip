@@ -55,7 +55,8 @@ router.post('/issue', async (req, res) => {
       credentialType,
       format: format as CredentialFormat,
       uin,
-      holderDid
+      holderDid,
+      subjectData: { ...subjectData, uin }
     });
 
     res.json({ success: true, credential: vc });

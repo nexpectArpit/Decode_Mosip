@@ -1,5 +1,4 @@
 import * as crypto from 'crypto';
-import fetch from 'node-fetch';
 import { ProtocolInspector } from '../middleware/inspector';
 import { IssuedCredentialPayload, CredentialFormat } from '../types';
 import { Ed25519Crypto, Ed25519KeyPair } from '../crypto/ed25519';
@@ -90,9 +89,11 @@ export class CertifyService {
     format?: CredentialFormat;
     uin?: string;
     holderDid?: string;
+    subjectData?: Record<string, any>;
   }): Promise<IssuedCredentialPayload> {
     const start = Date.now();
-    const uin = params.uin || '9876543210';
+    const uin = params.subjectData?.uin || params.uin || '9876543210';
+    const fullName = params.subjectData?.fullName || 'Ramesh Patel';
     const holderDid = params.holderDid || 'did:key:z6MkqFLQZ83XN';
 
     // When FarmerCredential (ldp_vc) is requested, attempt live Inji Certify OpenID4VCI issuance
@@ -103,7 +104,7 @@ export class CertifyService {
         const preAuthPayload = {
           credential_configuration_id: 'FarmerCredential',
           claims: {
-            fullName: 'Ramesh Patel',
+            fullName,
             dateOfBirth: '1978-08-20',
             gender: 'Male',
             phone: `+91-98${uin.slice(-8)}`
@@ -270,11 +271,17 @@ export class CertifyService {
               durationMs: Date.now() - start
             });
 
-            return {
-              ...liveVc,
-              format: 'ldp_vc',
-              issuerImplementation: 'INJI_CERTIFY'
-            };
+            // If live Inji Certify returned a raw template with unrendered placeholders, dynamically populate user's claims and re-sign
+            const rawSubject = liveVc.credentialSubject || {};
+            const isUnrendered = typeof rawSubject.primaryCropType === 'string' && rawSubject.primaryCropType.includes('${');
+            
+            if (!isUnrendered && rawSubject.fullName === fullName) {
+              return {
+                ...liveVc,
+                format: 'ldp_vc',
+                issuerImplementation: 'INJI_CERTIFY'
+              };
+            }
           }
         }
       } catch (err: any) {
@@ -282,11 +289,15 @@ export class CertifyService {
       }
     }
 
-    // Fallback or multi-format handling (mso_mdoc, vc+sd-jwt)
+    // Dynamic multi-format handling (mso_mdoc, vc+sd-jwt, ldp_vc)
     if (params.credentialType === 'MockMdl' || params.format === 'mso_mdoc') {
+      const nameParts = fullName.trim().split(' ');
+      const given_name = nameParts[0] || 'Rajesh';
+      const family_name = nameParts.slice(1).join(' ') || 'Sharma';
+
       const claims = {
-        family_name: 'Sharma',
-        given_name: 'Rajesh',
+        family_name,
+        given_name,
         birth_date: '1985-04-12',
         driving_privileges: [{ vehicle_category_code: 'MCWG' }, { vehicle_category_code: 'LMV' }],
         issue_date: new Date().toISOString().split('T')[0],
@@ -323,7 +334,7 @@ export class CertifyService {
       };
     } else if (params.format === 'vc+sd-jwt' || params.credentialType === 'NationalId') {
       const claims = {
-        fullName: 'Rajesh Sharma',
+        fullName,
         nationalId: `UIN-${uin}`,
         dateOfBirth: '1985-04-12',
         state: 'Maharashtra',
@@ -361,7 +372,7 @@ export class CertifyService {
       // Local cryptographic W3C VC engine using Inji Certify's published verificationMethod
       const claims = {
         farmerID: `FARMER-${uin}`,
-        fullName: 'Ramesh Patel',
+        fullName,
         mobileNumber: `+91-98${uin.slice(-8)}`,
         dateOfBirth: '1978-08-20',
         gender: 'Male',

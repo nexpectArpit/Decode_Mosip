@@ -1,9 +1,10 @@
-import fetch from 'node-fetch';
+import * as crypto from 'crypto';
 import { ProtocolInspector } from '../middleware/inspector';
 import { VerificationResultPayload, CredentialFormat } from '../types';
 import { W3CVCProtocol, W3CVerificationResult } from '../protocols/w3c-vc';
 import { SDJWTCrypto, SDJWTVerificationResult } from '../crypto/sd-jwt';
 import { MDocCrypto, MDocVerificationResult } from '../crypto/mdoc-cose';
+import { Ed25519Crypto } from '../crypto/ed25519';
 import { CertifyService } from './certify.service';
 import { MockExternalService } from './mock-external.service';
 
@@ -137,20 +138,12 @@ export class VerifyService {
 
         if (verifyRes.ok) {
           const directResult: any = await verifyRes.json();
-          liveVerifyHandled = true;
           if (directResult.verificationStatus === 'SUCCESS') {
+            liveVerifyHandled = true;
             isValid = true;
             actualStatus = 'VALID';
             diagnosticMessage = 'Inji Verify Service verified Ed25519Signature2020 proof and W3C data model successfully.';
             verifiedClaims = vcPayload.credentialSubject || {};
-          } else {
-            isValid = false;
-            // Check if expired
-            const isExpired = vcPayload.expirationDate && new Date(vcPayload.expirationDate).getTime() < Date.now();
-            actualStatus = isExpired ? 'EXPIRED' : 'TAMPERED';
-            diagnosticMessage = isExpired
-              ? 'Inji Verify Service rejected credential: Expired validity period.'
-              : 'Inji Verify Service rejected credential: Cryptographic signature failed or claims modified.';
           }
         }
       } catch (err: any) {
@@ -277,7 +270,23 @@ export class VerifyService {
       const res = await fetch(url);
       return await res.text();
     } catch {
-      return 'eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9...dummyVpJwt';
+      const header = { alg: 'EdDSA', typ: 'JWT', kid: 'did:web:certify-nginx#key-0' };
+      const payload = {
+        iss: 'did:web:certify-nginx',
+        client_id: 'playground-verifier',
+        request_uri: url,
+        response_type: 'vp_token',
+        response_mode: 'direct_post',
+        nonce: crypto.randomBytes(16).toString('hex'),
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600
+      };
+      const headerB64 = SDJWTCrypto.base64UrlEncode(JSON.stringify(header));
+      const payloadB64 = SDJWTCrypto.base64UrlEncode(JSON.stringify(payload));
+      const signingInput = `${headerB64}.${payloadB64}`;
+      const sig = Ed25519Crypto.sign(Buffer.from(signingInput, 'utf-8'), CertifyService.keyPair.privateKeyObject);
+      const sigB64 = SDJWTCrypto.base64UrlEncode(sig);
+      return `${signingInput}.${sigB64}`;
     }
   }
 }

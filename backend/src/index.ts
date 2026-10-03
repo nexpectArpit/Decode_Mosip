@@ -1,7 +1,6 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import fetch from 'node-fetch';
 import issuerRouter from './routes/issuer.router';
 import walletRouter from './routes/wallet.router';
 import verifierRouter from './routes/verifier.router';
@@ -15,6 +14,19 @@ const PORT = process.env.PORT || 4000;
 
 app.use(cors());
 app.use(express.json());
+
+app.use((req, res, next) => {
+  if (req.originalUrl.startsWith('/api/inspector/logs')) {
+    return next();
+  }
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    const statusColor = res.statusCode >= 400 ? '\x1b[31m' : '\x1b[32m';
+    console.log(`[API] ${req.method} ${req.originalUrl} -> ${statusColor}${res.statusCode}\x1b[0m (${duration}ms)`);
+  });
+  next();
+});
 
 // Routes
 app.use('/api/issuer', issuerRouter);
@@ -59,5 +71,5 @@ app.get('/api/health', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`[BFF] Inji Interoperability Playground BFF running on http://localhost:${PORT}`);
+  console.log(`[API] Inji Interop Lab Server running on http://localhost:${PORT}`);
 });

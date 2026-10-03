@@ -1,4 +1,3 @@
-import fetch from 'node-fetch';
 import { inspectorStore } from '../middleware/inspector';
 
 const MIMOTO_BASE_URL = process.env.MIMOTO_URL || 'http://localhost:8099/v1/mimoto';
