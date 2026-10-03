@@ -1,119 +1,39 @@
-import React, { useEffect, useState } from 'react';
-import { ShieldCheck, RefreshCw, FileText } from 'lucide-react';
-
-interface SystemHealth {
-  certify: { status: string };
-  mimoto: { status: string };
-  verify: { status: string };
-  database: { status: string };
-}
+import React from 'react';
+import { motion } from 'framer-motion';
+import { ThemeToggle } from './ThemeToggle';
 
 interface HeaderProps {
   onOpenReport: () => void;
-  onRefreshHealth: () => void;
+  onRefreshHealth?: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({ onOpenReport, onRefreshHealth }) => {
-  const [health, setHealth] = useState<SystemHealth>({
-    certify: { status: 'UNKNOWN' },
-    mimoto: { status: 'UNKNOWN' },
-    verify: { status: 'UNKNOWN' },
-    database: { status: 'UNKNOWN' }
-  });
-  const [loading, setLoading] = useState(false);
-
-  const fetchHealth = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('http://localhost:4000/api/health');
-      const data = await res.json();
-      setHealth(data);
-    } catch {
-      setHealth({
-        certify: { status: 'DOWN' },
-        mimoto: { status: 'DOWN' },
-        verify: { status: 'DOWN' },
-        database: { status: 'DOWN' }
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchHealth();
-    const interval = setInterval(fetchHealth, 10000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const getStatusDot = (status: string) => {
-    if (status === 'UP') return 'bg-emerald-400 shadow-[0_0_8px_#34d399]';
-    if (status === 'WARN') return 'bg-amber-400 shadow-[0_0_8px_#fbbf24]';
-    return 'bg-rose-500 shadow-[0_0_8px_#f43f5e]';
-  };
-
+export const Header: React.FC<HeaderProps> = ({ onOpenReport }) => {
   return (
-    <header className="glass-panel sticky top-0 z-40 mb-6 p-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-4">
-      <div className="flex items-center gap-3">
-        <div className="p-2.5 rounded-xl bg-gradient-to-tr from-indigo-600 to-cyan-500 text-white shadow-lg shadow-indigo-500/30">
-          <ShieldCheck className="w-6 h-6" />
-        </div>
+    <header className="sticky top-0 z-40 w-full bg-white/80 dark:bg-[#0B041A]/90 backdrop-blur-md border-b border-slate-200/80 dark:border-[#951F6F]/30 shadow-xs transition-colors">
+      <div className="max-w-[1680px] mx-auto px-4 md:px-6 py-4 flex items-center justify-between gap-4">
+        {/* Brand Title */}
         <div>
-          <h1 className="text-xl font-bold bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent">
-            MOSIP Inji Interoperability Playground
+          <h1 className="text-xl font-black text-[#002452] dark:text-white tracking-tight uppercase italic">
+            Inji Interop Lab
           </h1>
-          <p className="text-xs text-slate-400">
-            OpenID4VCI & OpenID4VP Standard Protocol Testing Suite
+          <p className="text-xs text-slate-600 dark:text-slate-300 font-medium mt-0.5">
+            Verifiable credential interoperability testbed across issuer · wallet · verifier
           </p>
         </div>
-      </div>
 
-      {/* System Status Indicators */}
-      <div className="flex items-center gap-4 bg-slate-950/60 px-4 py-2 rounded-xl border border-slate-800/80">
-        <div className="flex items-center gap-2 text-xs">
-          <span className="text-slate-400 font-medium">Inji Stack:</span>
+        {/* Right Controls: Theme Toggle & Audit Report Button */}
+        <div className="flex items-center gap-3 md:gap-4 shrink-0">
+          <ThemeToggle />
+
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.99 }}
+            onClick={onOpenReport}
+            className="bg-gradient-to-r from-[#F2680C] to-[#451691] dark:from-[#F2680C] dark:via-[#951F6F] dark:to-[#5B03AD] text-white font-bold text-xs px-4 py-2.5 rounded-xl transition-all shadow-md border border-white/20 cursor-pointer"
+          >
+            <span>Run Interop Audit</span>
+          </motion.button>
         </div>
-
-        <div className="flex items-center gap-3 text-xs font-mono">
-          <div className="flex items-center gap-1.5" title="Inji Certify (Port 8090)">
-            <span className={`w-2 h-2 rounded-full ${getStatusDot(health.certify.status)}`} />
-            <span className="text-slate-300">Certify:8090</span>
-          </div>
-
-          <div className="flex items-center gap-1.5" title="Mimoto BFF (Port 8099)">
-            <span className={`w-2 h-2 rounded-full ${getStatusDot(health.mimoto.status)}`} />
-            <span className="text-slate-300">Mimoto:8099</span>
-          </div>
-
-          <div className="flex items-center gap-1.5" title="Inji Verify (Port 8095)">
-            <span className={`w-2 h-2 rounded-full ${getStatusDot(health.verify.status)}`} />
-            <span className="text-slate-300">Verify:8095</span>
-          </div>
-
-          <div className="flex items-center gap-1.5" title="Playground BFF (Port 4000)">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_#34d399]" />
-            <span className="text-slate-300">BFF:4000</span>
-          </div>
-        </div>
-
-        <button
-          onClick={() => { fetchHealth(); onRefreshHealth(); }}
-          className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
-          title="Refresh Stack Status"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-        </button>
-      </div>
-
-      {/* Actions */}
-      <div className="flex items-center gap-3">
-        <button
-          onClick={onOpenReport}
-          className="btn btn-primary text-xs"
-        >
-          <FileText className="w-4 h-4" />
-          Interop Report
-        </button>
       </div>
     </header>
   );
