@@ -77,7 +77,23 @@ with open(path, 'w') as f:
 "
 
 echo "[*] Starting Inji Stack via Docker Compose..."
+docker network inspect mosip_network >/dev/null 2>&1 || docker network create mosip_network >/dev/null
 docker compose up -d
+
+echo "[*] Waiting for the demo Postgres database..."
+MAX_RETRIES=30
+RETRY=0
+until docker compose exec -T database pg_isready -U postgres >/dev/null 2>&1 || [ "$RETRY" -eq "$MAX_RETRIES" ]; do
+    sleep 2
+    RETRY=$((RETRY + 1))
+done
+if [ "$RETRY" -eq "$MAX_RETRIES" ]; then
+    echo "[-] Demo Postgres failed to initialize."
+    exit 1
+fi
+
+echo "[*] Repairing the bundled FarmerCredential claim metadata..."
+docker compose exec -T database psql -v ON_ERROR_STOP=1 -U postgres -d inji_certify < "$SCRIPT_DIR/infra/repair-certify-claims.sql"
 
 echo "[*] Waiting for Inji services to become healthy..."
 MAX_RETRIES=30

@@ -1,4 +1,6 @@
 node_modules/
+node_modules
+**/node_modules/
 dist/
 dist-ssr/
 *.log
@@ -6,5 +8,6 @@ dist-ssr/
 .env
 .env.local
 *.local
+backend/data/
 .vscode/
 .idea/

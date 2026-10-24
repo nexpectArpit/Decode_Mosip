@@ -1,0 +1,364 @@
+name: inji-interop-playground
+
+services:
+  cert-init:
+    build:
+      context: .
+      dockerfile: infra/cert-init.Dockerfile
+    environment:
+      OIDC_P12_PASSWORD: xy4gh6swa2i
+    volumes:
+      - certificates:/certificates
+    restart: "no"
+
+  database:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/inji-stack/certify_init.sql:/docker-entrypoint-initdb.d/01-certify.sql:ro
+      - ./infra/inji-stack/mimoto_init.sql:/docker-entrypoint-initdb.d/02-mimoto.sql:ro
+      - ./infra/inji-stack/verify_init.sql:/docker-entrypoint-initdb.d/03-verify.sql:ro
+      - ./infra/repair-certify-claims.sql:/docker-entrypoint-initdb.d/04-repair-claims.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  certify-public-config:
+    image: postgres:15
+    environment:
+      PGPASSWORD: postgres
+      CERTIFY_PUBLIC_DID: ${CERTIFY_PUBLIC_DID:-did:web:certify-nginx}
+    command: ["sh", "-ec", "psql -v ON_ERROR_STOP=1 -v public_did=\"$$CERTIFY_PUBLIC_DID\" -h database -U postgres -f /config/update-certify-public-did.sql"]
+    volumes:
+      - ./infra/update-certify-public-did.sql:/config/update-certify-public-did.sql:ro
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: "no"
+
+  object-store:
+    image: chrislusf/seaweedfs:4.46
+    command: server -s3 -s3.port=9000 -ip=object-store
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+    ports:
+      - "9000:9000"
+    volumes:
+      - object_store_data:/data
+
+  datashare-service:
+    image: mosipid/data-share-service:1.3.0-beta.2
+    environment:
+      active_profile_env: inji-default,standalone
+      SPRING_CONFIG_NAME: data-share
+      SPRING_CONFIG_LOCATION: /home/mosip/
+      DATASHARE_DOMAIN: datashare-service:8097
+    ports:
+      - "8097:8097"
+    volumes:
+      - ./infra/inji-stack/config/data-share-inji-default.properties:/home/mosip/data-share-inji-default.properties:ro
+      - ./infra/inji-stack/config/data-share-standalone.properties:/home/mosip/data-share-standalone.properties:ro
+    depends_on:
+      object-store:
+        condition: service_started
+
+  certify:
+    build:
+      context: .
+      dockerfile: infra/certify-holder-did/Dockerfile
+    image: inji-interop-playground-certify-holder-did:0.14.0
+    user: root
+    environment:
+      container_user: mosip
+      active_profile_env: default, csvdp-farmer
+      SPRING_CONFIG_NAME: certify
+      SPRING_CONFIG_LOCATION: /home/mosip/config/
+      enable_certify_artifactory: "false"
+      download_hsm_client: "false"
+      mosip_certify_domain_url: ${CERTIFY_PUBLIC_ORIGIN:-http://certify-nginx:80}
+      CERTIFY_PUBLIC_DID: ${CERTIFY_PUBLIC_DID:-did:web:certify-nginx}
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./infra/inji-stack/config/certify-default.properties:/home/mosip/config/certify-default.properties:ro
+      - ./infra/inji-stack/config/certify-csvdp-farmer.properties:/home/mosip/config/certify-csvdp-farmer.properties:ro
+      - ./infra/inji-stack/config/certify-mock-mdl.properties:/home/mosip/config/certify-mock-mdl.properties:ro
+      - ./infra/inji-stack/config/farmer_identity_data.csv:/home/mosip/config/farmer_identity_data.csv:ro
+      - ./infra/inji-stack/config/vp_request_config.json:/home/mosip/config/vp_request_config.json:ro
+      - certify_keys:/home/inji/CERTIFY_PKCS12
+    depends_on:
+      database:
+        condition: service_healthy
+      certify-public-config:
+        condition: service_completed_successfully
+
+  certify-nginx:
+    image: nginx:stable
+    ports:
+      - "8091:80"
+      - "8443:443"
+    volumes:
+      - ./infra/inji-stack/certify-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./infra/inji-stack/config/mimoto-issuers-config.json:/config/server/mimoto-issuers-config.json:ro
+      - ./infra/inji-stack/config/mimoto-trusted-verifiers.json:/config/server/mimoto-trusted-verifiers.json:ro
+      - ./infra/inji-stack/config/credential-template.html:/config/server/credential-template.html:ro
+      - ./infra/inji-stack/config/vp_request_config.json:/config/server/vp_request_config.json:ro
+      - ./infra/inji-stack/config/mosip-cbeff.xsd:/config/server/mosip-cbeff.xsd:ro
+      - certificates:/certificates:ro
+    depends_on:
+      cert-init:
+        condition: service_completed_successfully
+      certify:
+        condition: service_started
+
+  certify-gateway:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["node", "dist/certify-gateway.js"]
+    environment:
+      PORT: "8080"
+      CERTIFY_GATEWAY_UPSTREAM: http://certify-nginx
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    depends_on:
+      certify-nginx:
+        condition: service_started
+
+  mimoto-service:
+    image: injistack/mimoto:0.22.0
+    user: root
+    environment:
+      container_user: mosip
+      active_profile_env: default
+      SPRING_CONFIG_NAME: mimoto
+      SPRING_CONFIG_LOCATION: /home/mosip/
+      SPRING_CLOUD_BOOTSTRAP_LOCATION: /home/mosip/mimoto-bootstrap.properties
+      oidc_p12_password: xy4gh6swa2i
+      WALLET_BINDING_PARTNER_API_KEY: dummywalletbindingpartnerapikey
+      SPRING_DATASOURCE_URL: jdbc:postgresql://database:5432/inji_mimoto
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      GOOGLE_OAUTH_CLIENT_ID: clientId
+      GOOGLE_OAUTH_CLIENT_SECRET: clientSecret
+    ports:
+      - "8099:8099"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./infra/inji-stack/config/mimoto-default.properties:/home/mosip/mimoto-default.properties:ro
+      - ./infra/inji-stack/config/mimoto-bootstrap.properties:/home/mosip/mimoto-bootstrap.properties:ro
+      - ./infra/inji-stack/config/mimoto-issuers-config.json:/home/mosip/mimoto-issuers-config.json:ro
+      - ./infra/inji-stack/config/mimoto-trusted-verifiers.json:/home/mosip/mimoto-trusted-verifiers.json:ro
+      - certificates:/home/mosip/certs
+    depends_on:
+      cert-init:
+        condition: service_completed_successfully
+      database:
+        condition: service_healthy
+      datashare-service:
+        condition: service_started
+
+  inji-web:
+    image: injistack/inji-web:0.17.0
+    environment:
+      DEFAULT_LANG: en
+      MIMOTO_URL: http://localhost:3004/v1/mimoto
+    ports:
+      - "3004:3004"
+    volumes:
+      - ./infra/inji-stack/config/mimoto-default.properties:/home/mosip/mimoto-default.properties:ro
+      - ./infra/inji-stack/config/mimoto-issuers-config.json:/home/mosip/mimoto-issuers-config.json:ro
+      - ./infra/inji-stack/config/mimoto-trusted-verifiers.json:/home/mosip/mimoto-trusted-verifiers.json:ro
+      - ./infra/inji-stack/config/credential-template.html:/home/mosip/credential-template.html:ro
+      - ./infra/inji-stack/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      mimoto-service:
+        condition: service_started
+
+  verify-service:
+    image: injistack/inji-verify-service:0.17.0
+    user: root
+    environment:
+      active_profile_env: default
+      USE_SYSTEM_CA_CERTS: "true"
+      DATABASE_HOST: database
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: inji_verify
+      DATABASE_SCHEMA: verify
+      DATABASE_USERNAME: postgres
+      DATABASE_PASSWORD: postgres
+      INJI_VP_REQUEST_LONG_POLLING_TIMEOUT: "55000"
+      # Mimoto submits Inji Web presentations from inside a container. The
+      # Docker host gateway keeps the same-device response URI reachable.
+      INJI_VP_SUBMISSION_BASE_URL: ${VERIFY_PUBLIC_URL:-http://host.docker.internal:8095/v1/verify}
+      INJI_DID_VERIFY_URI: ${VERIFY_PUBLIC_DID:-did:web:verify-service:v1:verify}
+      INJI_DID_VERIFY_PUBLIC_KEY_URI: ${VERIFY_PUBLIC_DID:-did:web:verify-service:v1:verify}#key-0
+      INJI_KEYSTORE_FILE_PASS: mosip
+      INJI_VERIFY_REDIRECT_URI: ${VERIFY_PUBLIC_ORIGIN:-http://localhost:8095}
+    volumes:
+      - certificates:/certificates:ro
+    depends_on:
+      cert-init:
+        condition: service_completed_successfully
+      database:
+        condition: service_healthy
+
+  verify-gateway:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["node", "dist/verify-gateway.js"]
+    environment:
+      PORT: "8080"
+      VERIFY_UPSTREAM_URL: http://verify-service:8080
+      VERIFY_PUBLIC_DID: ${VERIFY_PUBLIC_DID:-did:web:verify-service:v1:verify}
+      VERIFY_REQUEST_SIGNING_KEY_PATH: /certificates/verify-request-signing-key.pem
+    volumes:
+      - certificates:/certificates
+    ports:
+      - "8095:8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    depends_on:
+      verify-service:
+        condition: service_started
+
+  # Isolated OpenID4VP 1.0 / DCQL path for Inji Mobile 1.0.0-alpha.1.
+  # The local profile uses ephemeral HSQLDB, avoiding changes to the legacy
+  # Postgres schema or the running PEX verifier.
+  verify-service-alpha:
+    image: injistack/inji-verify-service:1.0.0-alpha.1
+    user: root
+    environment:
+      active_profile_env: local
+      INJI_VP_REQUEST_LONG_POLLING_TIMEOUT: "55000"
+      INJI_VP_SUBMISSION_BASE_URL: ${VERIFY_PUBLIC_URL:-http://host.docker.internal:8095/v1/verify}
+      INJI_DID_VERIFY_URI: ${VERIFY_PUBLIC_DID:-did:web:verify-service:v1:verify}
+      INJI_DID_VERIFY_PUBLIC_KEY_URI: ${VERIFY_PUBLIC_DID:-did:web:verify-service:v1:verify}#key-0
+      INJI_KEYSTORE_FILE_PASS: mosip
+      INJI_VERIFY_REDIRECT_URI: ${VERIFY_PUBLIC_ORIGIN:-http://localhost:8095}
+    volumes:
+      - certificates:/certificates:ro
+  verify-gateway-alpha:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["node", "dist/verify-gateway.js"]
+    environment:
+      PORT: "8080"
+      VERIFY_UPSTREAM_URL: http://verify-service-alpha:8080
+      VERIFY_INDEPENDENT_VP_ENABLED: "true"
+      VERIFY_PUBLIC_DID: ${VERIFY_PUBLIC_DID:-did:web:verify-service:v1:verify}
+      VERIFY_REQUEST_SIGNING_KEY_PATH: /certificates/verify-request-signing-key.pem
+    volumes:
+      - certificates:/certificates:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    depends_on:
+      verify-service-alpha:
+        condition: service_started
+
+  playground-backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      PORT: "4000"
+      CERTIFY_URL: http://certify:8090/v1/certify
+      CERTIFY_NGINX_URL: http://certify-nginx
+      CERTIFY_GATEWAY_URL: http://certify-gateway:8080
+      MIMOTO_URL: http://mimoto-service:8099/v1/mimoto
+      VERIFY_URL: http://verify-gateway:8080/v1/verify
+      VERIFY_PUBLIC_URL: ${VERIFY_PUBLIC_URL:-http://host.docker.internal:8095/v1/verify}
+      VERIFY_PUBLIC_DID: ${VERIFY_PUBLIC_DID:-did:web:verify-service:v1:verify}
+      CERTIFY_PUBLIC_DID: ${CERTIFY_PUBLIC_DID:-did:web:certify-nginx}
+      CERTIFY_PUBLIC_ORIGIN: ${CERTIFY_PUBLIC_ORIGIN:-http://certify-nginx:80}
+      VERIFY_DIRECT_URL: http://verify-service:8080/v1/verify
+      VERIFY_ALPHA_URL: http://verify-gateway-alpha:8080/v1/verify
+      VERIFY_ALPHA_GATEWAY_URL: http://verify-gateway-alpha:8080
+      DATABASE_HOST: database
+      DATABASE_PORT: "5432"
+      MATRIX_HISTORY_PATH: /app/data/matrix-runs.json
+      AUDIT_HISTORY_PATH: /app/data/audit-runs.json
+      VP_HISTORY_PATH: /app/data/vp-runs.json
+      MATRIX_REPORT_PATH: /workspace/docs/INTEROP_TEST_RESULTS.md
+      MOCK_ISSUER_PRIVATE_KEY_PATH: /certificates/mock-issuer.key
+      MOCK_ISSUER_CERTIFICATE_PATH: /certificates/mock-issuer.crt
+    ports:
+      - "4000:4000"
+    volumes:
+      - matrix_history:/app/data
+      - certificates:/certificates:ro
+      - ./docs:/workspace/docs
+    depends_on:
+      certify-nginx:
+        condition: service_started
+      certify-gateway:
+        condition: service_healthy
+      verify-service:
+        condition: service_started
+      verify-gateway:
+        condition: service_healthy
+
+  playground-frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      VITE_API_PROXY_TARGET: http://playground-backend:4000
+      VITE_CERTIFY_PROXY_TARGET: http://certify-gateway:8080
+      VITE_VERIFY_PROXY_TARGET: http://verify-gateway-alpha:8080
+      VITE_VERIFY_ALPHA_PROXY_TARGET: http://verify-gateway-alpha:8080
+      VITE_MIMOTO_PROXY_TARGET: http://mimoto-service:8099
+    ports:
+      - "5173:5173"
+    depends_on:
+      playground-backend:
+        condition: service_started
+
+  # Opt in only for a physical-phone test. A tunnel must target this loopback
+  # port, never the frontend or backend ports, to keep UI and audit APIs local.
+  mobile-edge:
+    profiles: [phone]
+    image: nginx:stable
+    ports:
+      - "127.0.0.1:18765:8080"
+    volumes:
+      - ./infra/mobile-edge.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      certify-gateway:
+        condition: service_healthy
+      verify-gateway:
+        condition: service_healthy
+      verify-gateway-alpha:
+        condition: service_healthy
+      playground-backend:
+        condition: service_started
+
+volumes:
+  certificates:
+  certify_keys:
+  postgres_data:
+  matrix_history:
+  object_store_data:
