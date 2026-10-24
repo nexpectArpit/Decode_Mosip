@@ -1,33 +1,51 @@
-import React, { useState } from 'react';
+import React, { Suspense, useState } from 'react';
 import { Cpu, ArrowRight } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { CustomSelect, type SelectOption } from './CustomSelect';
 import { formatCredentialTitle } from '../utils/format';
 
-export type TamperAttackVector = 'NONE' | 'INVALID_SIGNATURE' | 'EXPIRED_CREDENTIAL' | 'ALTERED_CLAIMS' | 'MISMATCHED_NONCE';
+const InjiVerifySdkPanel = React.lazy(() => import('./InjiVerifySdkPanel').then(module => ({ default: module.InjiVerifySdkPanel })));
+
+export type TamperAttackVector = 'NONE' | 'INVALID_SIGNATURE' | 'EXPIRED_CREDENTIAL' | 'ALTERED_CLAIMS' | 'CORRUPTED_DISCLOSURE' | 'MISMATCHED_NONCE';
 
 interface VerifierColumnProps {
+  walletType: 'INJI_WEB' | 'PLAYGROUND_BROWSER_VAULT' | 'INJI_MOBILE' | 'MOCK_EXTERNAL_WALLET';
   selectedVc: any;
+  implementation: 'INJI_VERIFY' | 'MOCK_EXTERNAL_OID4VP';
+  onChangeImplementation: (implementation: 'INJI_VERIFY' | 'MOCK_EXTERNAL_OID4VP') => void;
   onExecuteVerify: (implementation: 'INJI_VERIFY' | 'MOCK_EXTERNAL_OID4VP') => void;
   isVerifying: boolean;
   verificationResult: any;
   tamperScenario: TamperAttackVector;
   onChangeTamperScenario: (scenario: TamperAttackVector) => void;
+  onMobileVPStarted: () => void;
+  onMobileVPResult: (result: any | null, error?: string) => void;
+  onMobileTransactionReceived: (transactionId: string) => void;
 }
 
 export const VerifierColumn: React.FC<VerifierColumnProps> = ({
+  walletType,
   selectedVc,
+  implementation,
+  onChangeImplementation,
   onExecuteVerify,
   isVerifying,
   verificationResult,
   tamperScenario,
-  onChangeTamperScenario
+  onChangeTamperScenario,
+  onMobileVPStarted,
+  onMobileVPResult,
+  onMobileTransactionReceived
 }) => {
-  const [implementation, setImplementation] = useState<'INJI_VERIFY' | 'MOCK_EXTERNAL_OID4VP'>('INJI_VERIFY');
+  const [sdkPreference, setSdkPreference] = useState<{ selection: string; visible: boolean } | null>(null);
+  const sdkSelection = `${walletType}:${implementation}`;
+  const showSdk = sdkPreference?.selection === sdkSelection
+    ? sdkPreference.visible
+    : walletType === 'INJI_MOBILE' && implementation === 'INJI_VERIFY';
 
   const nodeOptions: SelectOption[] = [
     { value: 'INJI_VERIFY', label: 'Inji Verify (Docker :8095)' },
-    { value: 'MOCK_EXTERNAL_OID4VP', label: 'External Mock Verifier (OID4VP)' }
+    { value: 'MOCK_EXTERNAL_OID4VP', label: 'Local Mock Crypto Verifier' }
   ];
 
   const attackOptions: SelectOption[] = [
@@ -35,18 +53,35 @@ export const VerifierColumn: React.FC<VerifierColumnProps> = ({
     { value: 'INVALID_SIGNATURE', label: 'Tamper: Invalid Signature' },
     { value: 'EXPIRED_CREDENTIAL', label: 'Tamper: Expired Credential' },
     { value: 'ALTERED_CLAIMS', label: 'Tamper: Altered Claims' },
-    { value: 'MISMATCHED_NONCE', label: 'Tamper: Replay Attack (Mismatched Nonce)' }
+    { value: 'CORRUPTED_DISCLOSURE', label: 'Tamper: Corrupted Disclosure' },
+    { value: 'MISMATCHED_NONCE', label: 'Replay: Mismatched VP Nonce' }
   ];
+  const availableAttackOptions = walletType === 'INJI_MOBILE' || walletType === 'INJI_WEB'
+    ? attackOptions.filter(option => option.value === 'NONE')
+    : attackOptions;
+
+  const format = selectedVc?.format || 'ldp_vc';
+  const flowSupported = !selectedVc ? false : tamperScenario === 'MISMATCHED_NONCE'
+    ? walletType === 'MOCK_EXTERNAL_WALLET' && (
+      (implementation === 'INJI_VERIFY' && format === 'ldp_vc') ||
+      (implementation === 'MOCK_EXTERNAL_OID4VP' && format === 'vc+sd-jwt'))
+    : tamperScenario === 'CORRUPTED_DISCLOSURE'
+      ? format === 'vc+sd-jwt'
+      : tamperScenario === 'ALTERED_CLAIMS'
+        ? format === 'ldp_vc'
+        : tamperScenario === 'EXPIRED_CREDENTIAL'
+          ? format !== 'mso_mdoc'
+          : implementation !== 'INJI_VERIFY' || format === 'ldp_vc' || format === 'vc+sd-jwt';
 
   return (
-    <div className="inji-card flex flex-col h-full relative transition-colors">
+    <div className="inji-card min-w-0 flex flex-col h-full relative transition-colors">
       <div className="inji-card-header p-5 flex items-center justify-between">
         <div>
           <h2 className="font-extrabold text-[#002452] dark:text-[#C084FC] text-lg tracking-tight italic">VERIFIER</h2>
-          <span className="text-xs text-[#451691] dark:text-[#C084FC] font-mono font-extrabold">Inji Verify</span>
+          <span className="text-xs text-[#451691] dark:text-[#C084FC] font-mono font-extrabold">{implementation === 'INJI_VERIFY' ? 'Inji Verify' : 'Local Mock Crypto Verifier'}</span>
         </div>
         <span className="text-[10px] font-extrabold uppercase tracking-wider bg-purple-50 dark:bg-purple-900/60 text-purple-700 dark:text-[#E9D5FF] border border-purple-200 dark:border-purple-500/60 px-3 py-1 rounded-full">
-          OpenID4VP
+          VC Verification
         </span>
       </div>
 
@@ -60,7 +95,7 @@ export const VerifierColumn: React.FC<VerifierColumnProps> = ({
             <CustomSelect
               options={nodeOptions}
               value={implementation}
-              onChange={(val) => setImplementation(val as any)}
+              onChange={(val) => onChangeImplementation(val as 'INJI_VERIFY' | 'MOCK_EXTERNAL_OID4VP')}
             />
           </div>
 
@@ -86,7 +121,7 @@ export const VerifierColumn: React.FC<VerifierColumnProps> = ({
               <span>Verification Mode / Security Scenario:</span>
             </label>
             <CustomSelect
-              options={attackOptions}
+              options={availableAttackOptions}
               value={tamperScenario}
               onChange={(val) => onChangeTamperScenario(val as TamperAttackVector)}
             />
@@ -104,6 +139,27 @@ export const VerifierColumn: React.FC<VerifierColumnProps> = ({
               </span>
             </div>
           )}
+          {selectedVc && !flowSupported && (
+            <p role="status" className="text-[11px] text-amber-700 dark:text-amber-300">
+              {tamperScenario === 'MISMATCHED_NONCE'
+                ? 'Nonce replay testing requires a signed OpenID4VP presentation. Select the Local Reference Wallet with Inji Verify (W3C VC) or the Local Mock Crypto Verifier (SD-JWT VC).'
+                : walletType === 'INJI_MOBILE' || walletType === 'INJI_WEB'
+                  ? 'Attack injection is unavailable for the existing Inji wallet flow. Choose Normal Verification to use the wallet’s native presentation.'
+                  : `This verifier and security scenario do not support ${format}. Choose Inji Verify for W3C VC or SD-JWT, or the local verifier for mDoc.`}
+            </p>
+          )}
+          {implementation === 'INJI_VERIFY' && (
+            <button type="button" onClick={() => setSdkPreference({ selection: sdkSelection, visible: !showSdk })} aria-expanded={showSdk}
+              className="w-full rounded-xl border border-[#451691]/30 p-2.5 text-xs font-bold text-[#451691] dark:text-[#C084FC]">
+              {showSdk ? 'Hide Official Inji Verify SDK' : 'Open Official Inji Verify SDK'}
+            </button>
+          )}
+          {implementation === 'INJI_VERIFY' && showSdk && (
+            <Suspense fallback={<div className="inji-subcard rounded-2xl p-4 text-xs">Loading Inji Verify SDK…</div>}>
+              <InjiVerifySdkPanel onVPStarted={onMobileVPStarted} onVPResult={onMobileVPResult}
+                onTransactionReceived={onMobileTransactionReceived} />
+            </Suspense>
+          )}
         </div>
 
         {/* Verify Action Button */}
@@ -112,7 +168,7 @@ export const VerifierColumn: React.FC<VerifierColumnProps> = ({
           whileTap={{ scale: 0.99 }}
           type="button"
           onClick={() => onExecuteVerify(implementation)}
-          disabled={!selectedVc || isVerifying}
+          disabled={!selectedVc || !flowSupported || isVerifying}
           className="w-full bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:opacity-50 text-white font-bold text-xs py-3.5 rounded-xl flex items-center justify-center gap-2 transition-all shadow-md border border-white/20 cursor-pointer"
         >
           {isVerifying ? (
@@ -122,7 +178,7 @@ export const VerifierColumn: React.FC<VerifierColumnProps> = ({
             </>
           ) : (
             <>
-              <span>Verify Presentation</span>
+          <span>Verify Credential</span>
               <ArrowRight className="w-4 h-4" />
             </>
           )}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Terminal, Trash2, Copy, Check } from 'lucide-react';
 import { CustomSelect, type SelectOption } from './CustomSelect';
 
@@ -20,20 +20,23 @@ interface ProtocolLog {
 interface ProtocolInspectorProps {
   onSelectLogForTrace?: (log: ProtocolLog) => void;
   refreshTrigger?: number;
+  flowId?: string;
 }
 
-export const ProtocolInspector: React.FC<ProtocolInspectorProps> = ({ refreshTrigger }) => {
+export const ProtocolInspector: React.FC<ProtocolInspectorProps> = ({ refreshTrigger, flowId }) => {
   const [logs, setLogs] = useState<ProtocolLog[]>([]);
   const [selectedLog, setSelectedLog] = useState<ProtocolLog | null>(null);
   const [protocolFilter, setProtocolFilter] = useState<string>('ALL');
   const [copied, setCopied] = useState(false);
 
-  const fetchLogs = async () => {
+  const fetchLogs = useCallback(async (signal?: AbortSignal) => {
     try {
-      const url = protocolFilter === 'ALL'
-        ? 'http://localhost:4000/api/inspector/logs'
-        : `http://localhost:4000/api/inspector/logs?protocol=${protocolFilter}`;
-      const res = await fetch(url);
+      const query = new URLSearchParams();
+      if (protocolFilter !== 'ALL') query.set('protocol', protocolFilter);
+      if (flowId) query.set('flowId', flowId);
+      const url = `/api/inspector/logs${query.size ? `?${query}` : ''}`;
+      const res = await fetch(url, { signal });
+      if (!res.ok) throw new Error(`Trace request failed (${res.status})`);
       const data = await res.json();
       const fetchedLogs = data.logs || [];
       setLogs(fetchedLogs);
@@ -44,13 +47,13 @@ export const ProtocolInspector: React.FC<ProtocolInspectorProps> = ({ refreshTri
         setSelectedLog(null);
       }
     } catch (err) {
-      console.error(err);
+      if (!signal?.aborted) console.error(err);
     }
-  };
+  }, [protocolFilter, flowId]);
 
   const clearLogs = async () => {
     try {
-      await fetch('http://localhost:4000/api/inspector/logs', { method: 'DELETE' });
+      await fetch('/api/inspector/logs', { method: 'DELETE' });
       setLogs([]);
       setSelectedLog(null);
     } catch (err) {
@@ -59,8 +62,19 @@ export const ProtocolInspector: React.FC<ProtocolInspectorProps> = ({ refreshTri
   };
 
   useEffect(() => {
-    fetchLogs();
-  }, [protocolFilter, refreshTrigger]);
+    let requestController: AbortController | undefined;
+    const refresh = () => {
+      requestController?.abort();
+      requestController = new AbortController();
+      void fetchLogs(requestController.signal);
+    };
+    refresh();
+    const timer = flowId ? window.setInterval(refresh, 900) : undefined;
+    return () => {
+      if (timer) window.clearInterval(timer);
+      requestController?.abort();
+    };
+  }, [fetchLogs, refreshTrigger, flowId]);
 
   const handleCopyPayload = () => {
     if (selectedLog) {
@@ -74,14 +88,15 @@ export const ProtocolInspector: React.FC<ProtocolInspectorProps> = ({ refreshTri
     { value: 'ALL', label: 'All Protocols' },
     { value: 'OpenID4VCI', label: 'OpenID4VCI' },
     { value: 'OpenID4VP', label: 'OpenID4VP' },
-    { value: 'W3C_VC', label: 'W3C VC' }
+    { value: 'W3C_VC', label: 'W3C VC' },
+    { value: 'SYSTEM', label: 'Local Operations' }
   ];
 
   return (
-    <div className="inji-card overflow-hidden flex flex-col transition-all duration-300 border-slate-200 dark:border-[#951F6F]/40 flex-1 bg-white dark:bg-[#140A24] shadow-sm dark:shadow-2xl">
+    <div className="inji-card min-w-0 overflow-hidden flex flex-col transition-all duration-300 border-slate-200 dark:border-[#951F6F]/40 flex-1 bg-white dark:bg-[#140A24] shadow-sm dark:shadow-2xl">
       {/* Header Bar */}
-      <div className="p-4 bg-slate-100 dark:bg-[#0B041A] border-b border-slate-200 dark:border-[#951F6F]/40 flex items-center justify-between">
-        <div className="flex items-center gap-3">
+      <div className="min-w-0 p-4 bg-slate-100 dark:bg-[#0B041A] border-b border-slate-200 dark:border-[#951F6F]/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
           <div className="flex items-center gap-2 text-slate-900 dark:text-white font-extrabold text-xs uppercase tracking-wider italic">
             <Terminal className="w-4 h-4 text-[#F2680C]" />
             <span>Protocol Inspector & Network Debugger</span>
@@ -91,8 +106,8 @@ export const ProtocolInspector: React.FC<ProtocolInspectorProps> = ({ refreshTri
           </span>
         </div>
 
-        <div className="flex items-center gap-3">
-          <div className="w-40">
+        <div className="w-full sm:w-auto flex flex-col min-[480px]:flex-row items-stretch min-[480px]:items-center gap-2 sm:gap-3">
+          <div className="w-full min-[480px]:w-40">
             <CustomSelect
               options={filterOptions}
               value={protocolFilter}
@@ -112,33 +127,39 @@ export const ProtocolInspector: React.FC<ProtocolInspectorProps> = ({ refreshTri
       </div>
 
       {/* Debugger Content Area */}
-      <div className="bg-slate-50 dark:bg-[#0B041A] text-xs font-mono flex-1 flex flex-col min-h-[320px]">
+      <div className="bg-slate-50 dark:bg-[#0B041A] text-xs font-mono flex-1 flex flex-col min-h-[120px]">
+        {logs.length === 0 ? (
+          <div className="flex min-h-[120px] items-center justify-center p-6 text-center text-slate-400 dark:text-slate-500 italic">
+            No protocol interactions recorded yet. Issue or verify a credential above.
+          </div>
+        ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-slate-200 dark:divide-[#951F6F]/30 flex-1 min-h-[320px]">
           {/* Log Trace Table */}
-          <div className="overflow-y-auto p-3 space-y-1.5 max-h-[340px] bg-slate-50 dark:bg-[#0B041A]">
+          <div className="min-w-0 overflow-y-auto p-3 space-y-1.5 max-h-[340px] bg-slate-50 dark:bg-[#0B041A]">
                 {logs.length === 0 ? (
                   <div className="p-8 text-center text-slate-400 dark:text-slate-500 italic">
                     No protocol interactions recorded yet. Issue or verify a credential above.
                   </div>
                 ) : (
                   logs.map((log) => (
-                    <div
+                    <button type="button"
                       key={log.id}
                       onClick={() => setSelectedLog(log)}
-                      className={`p-2.5 rounded-xl border transition-all cursor-pointer flex items-center justify-between text-[11px] ${
+                      aria-label={`${log.protocol}: ${log.step}, ${log.actor}${log.status ? `, HTTP ${log.status}` : ''}`}
+                      className={`w-full min-w-0 p-2.5 rounded-xl border transition-all cursor-pointer grid grid-cols-[minmax(0,1fr)_auto] gap-2 items-center text-left text-[11px] ${
                         selectedLog?.id === log.id
                           ? 'bg-[#F2680C]/10 dark:bg-gradient-to-r dark:from-[#1E0A3C] dark:to-[#0F041F] border-[#F2680C] text-slate-900 dark:text-white shadow-sm'
                           : 'bg-white dark:bg-[#140A24] border-slate-200 dark:border-[#951F6F]/30 text-slate-800 dark:text-slate-300 hover:bg-slate-100/60 dark:hover:border-[#951F6F]/60'
                       }`}
                     >
-                      <div className="flex items-center gap-2.5 overflow-hidden">
-                        <span className={`text-[10px] font-sans ${selectedLog?.id === log.id ? 'text-slate-600 dark:text-slate-400 font-bold' : 'text-slate-500 dark:text-slate-400'}`}>
+                      <div className="min-w-0 flex items-center gap-2 overflow-hidden">
+                        <span className={`shrink-0 text-[10px] font-sans ${selectedLog?.id === log.id ? 'text-slate-600 dark:text-slate-400 font-bold' : 'text-slate-500 dark:text-slate-400'}`}>
                           {new Date(log.timestamp).toLocaleTimeString()}
                         </span>
-                        <span className="px-2 py-0.5 rounded-md bg-[#F2680C]/10 dark:bg-[#F2680C]/20 text-[#F2680C] border border-[#F2680C]/30 dark:border-[#F2680C]/40 font-bold text-[10px]">
+                        <span className="shrink-0 px-2 py-0.5 rounded-md bg-[#F2680C]/10 dark:bg-[#F2680C]/20 text-[#F2680C] border border-[#F2680C]/30 dark:border-[#F2680C]/40 font-bold text-[10px]">
                           {log.protocol}
                         </span>
-                        <span className={`truncate font-semibold ${selectedLog?.id === log.id ? 'text-slate-900 dark:text-white font-bold' : 'text-slate-900 dark:text-white'}`}>{log.step}</span>
+                        <span className="min-w-0 truncate font-semibold text-slate-900 dark:text-white" title={log.step}>{log.step}</span>
                       </div>
 
                       <div className="flex items-center gap-2 text-[10px] shrink-0 font-mono">
@@ -155,7 +176,7 @@ export const ProtocolInspector: React.FC<ProtocolInspectorProps> = ({ refreshTri
                           </span>
                         )}
                       </div>
-                    </div>
+                    </button>
                   ))
                 )}
               </div>
@@ -188,7 +209,7 @@ export const ProtocolInspector: React.FC<ProtocolInspectorProps> = ({ refreshTri
                     </div>
 
                     <div className="flex flex-col gap-1">
-                      <span className="text-[10px] text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider">HTTP Headers:</span>
+                      <span className="text-[10px] text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider">{selectedLog.direction === 'INTERNAL' ? 'Local operation metadata:' : 'HTTP Headers:'}</span>
                       <pre className="p-2.5 text-[10px] text-slate-800 dark:text-slate-300 bg-slate-50 dark:bg-[#0B041A] border border-slate-200 dark:border-[#951F6F]/30 rounded-lg overflow-x-auto font-mono">
                         {JSON.stringify(selectedLog.headers, null, 2)}
                       </pre>
@@ -203,12 +224,13 @@ export const ProtocolInspector: React.FC<ProtocolInspectorProps> = ({ refreshTri
                   </>
                 ) : (
                   <div className="h-full flex items-center justify-center text-slate-400 dark:text-slate-500 italic text-xs p-8 text-center">
-                    Select a protocol trace on the left to inspect raw HTTP headers and payload bodies.
+                    Select a trace on the left to inspect its metadata and payload.
                   </div>
                 )}
               </div>
             </div>
-        </div>
+        )}
+    </div>
     </div>
   );
 };
