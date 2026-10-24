@@ -202,6 +202,10 @@ export class MDocCrypto {
       }
 
       const [protectedHeaderBytes, , msoPayloadBytes, signatureBytes] = coseArray;
+      const protectedHeader = cbor.decodeFirstSync(protectedHeaderBytes);
+      if (!(protectedHeader instanceof Map) || protectedHeader.get(1) !== -8) {
+        throw new Error('COSE_Sign1 protected header does not declare EdDSA');
+      }
 
       // 1. Verify COSE_Sign1 signature
       const sigStructure = ['Signature1', protectedHeaderBytes, Buffer.alloc(0), msoPayloadBytes];
@@ -224,8 +228,10 @@ export class MDocCrypto {
       // 2. Decode and check MSO
       const mso = cbor.decodeFirstSync(msoPayloadBytes);
       const now = new Date().getTime();
+      const validFrom = new Date(mso.validityInfo?.validFrom).getTime();
       const validUntil = new Date(mso.validityInfo?.validUntil).getTime();
-      const notExpired = now <= validUntil;
+      const notExpired = Number.isFinite(validFrom) && Number.isFinite(validUntil) &&
+        validFrom <= now && now <= validUntil;
 
       if (!notExpired) {
         return {
@@ -236,7 +242,7 @@ export class MDocCrypto {
           issuerDid: mso.issuerDid || '',
           docType: doc.docType,
           claims: {},
-          errorMessage: `mDoc expired on ${mso.validityInfo?.validUntil}.`
+          errorMessage: `mDoc is outside validity interval ${mso.validityInfo?.validFrom} to ${mso.validityInfo?.validUntil}.`
         };
       }
 
@@ -244,6 +250,9 @@ export class MDocCrypto {
       const namespace = 'org.iso.18013.5.1';
       const msoDigests = mso.valueDigests?.[namespace] || {};
       const presentedItems = doc.issuerSigned.nameSpaces?.[namespace] || [];
+      if (!Array.isArray(presentedItems) || presentedItems.length === 0) {
+        throw new Error('mDoc has no presented IssuerSigned items');
+      }
       const claims: Record<string, any> = {};
 
       for (const itemBytes of presentedItems) {

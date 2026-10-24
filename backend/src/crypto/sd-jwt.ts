@@ -28,6 +28,15 @@ export interface SDJWTVerificationResult {
   errorMessage?: string;
 }
 
+export interface SDJWTSigningKey {
+  issuer: string;
+  algorithm: 'EdDSA' | 'RS256';
+  privateKeyObject: crypto.KeyObject;
+  publicKeyObject: crypto.KeyObject;
+  keyId?: string;
+  x5c?: string[];
+}
+
 export class SDJWTCrypto {
   /**
    * Helper to base64url encode a buffer or UTF-8 string.
@@ -81,24 +90,36 @@ export class SDJWTCrypto {
    */
   public static issueSDJWT(params: {
     issuerKeyPair: Ed25519KeyPair;
+    signingKey?: SDJWTSigningKey;
     holderDid: string;
+    holderPublicJwk?: Record<string, string>;
     claims: Record<string, any>;
     disclosableClaimKeys: string[];
     validitySeconds?: number;
+    credentialType?: string;
   }): SDJWTIssuanceResult {
+    const signingKey: SDJWTSigningKey = params.signingKey || {
+      issuer: params.issuerKeyPair.did,
+      algorithm: 'EdDSA',
+      privateKeyObject: params.issuerKeyPair.privateKeyObject,
+      publicKeyObject: params.issuerKeyPair.publicKeyObject,
+      keyId: `${params.issuerKeyPair.did}#key-1`
+    };
     const now = Math.floor(Date.now() / 1000);
     const exp = now + (params.validitySeconds || 365 * 24 * 3600);
 
     const disclosures: DisclosureObject[] = [];
     const sdDigests: string[] = [];
     const payload: Record<string, any> = {
-      iss: params.issuerKeyPair.did,
+      iss: signingKey.issuer,
       sub: params.holderDid,
+      vct: params.credentialType || 'urn:inji:local:ReferenceCredential',
       iat: now,
       nbf: now,
       exp: exp,
       _sd_alg: 'sha-256'
     };
+    if (params.holderPublicJwk) payload.cnf = { jwk: params.holderPublicJwk };
 
     // Separate claims into disclosable vs always visible
     for (const [key, value] of Object.entries(params.claims)) {
@@ -115,19 +136,21 @@ export class SDJWTCrypto {
     sdDigests.sort();
     payload._sd = sdDigests;
 
-    // JWT Header (EdDSA / Ed25519)
-    const header = {
+    const header: Record<string, unknown> = {
       typ: 'vc+sd-jwt',
-      alg: 'EdDSA',
-      kid: `${params.issuerKeyPair.did}#key-1`
+      alg: signingKey.algorithm,
+      kid: signingKey.keyId
     };
+    if (signingKey.x5c) header.x5c = signingKey.x5c;
 
     const encodedHeader = this.base64UrlEncode(JSON.stringify(header));
     const encodedPayload = this.base64UrlEncode(JSON.stringify(payload));
     const signingInput = `${encodedHeader}.${encodedPayload}`;
 
     // Cryptographic signature
-    const signature = Ed25519Crypto.sign(signingInput, params.issuerKeyPair.privateKeyObject);
+    const signature = signingKey.algorithm === 'EdDSA'
+      ? Ed25519Crypto.sign(signingInput, signingKey.privateKeyObject)
+      : crypto.sign('RSA-SHA256', Buffer.from(signingInput), signingKey.privateKeyObject);
     const encodedSignature = this.base64UrlEncode(signature);
 
     const issuerSignedJwt = `${signingInput}.${encodedSignature}`;
@@ -139,7 +162,7 @@ export class SDJWTCrypto {
       issuerSignedJwt,
       disclosures,
       payload,
-      issuerDid: params.issuerKeyPair.did
+      issuerDid: signingKey.issuer
     };
   }
 
@@ -174,13 +197,18 @@ export class SDJWTCrypto {
     const [headerB64, payloadB64, signatureB64] = jwtSegments;
     const signingInput = `${headerB64}.${payloadB64}`;
 
-    // 1. Verify cryptographic signature
+    // 1. Verify cryptographic signature using the declared and supported JWS algorithm.
     let signatureValid = false;
     try {
+      const header = JSON.parse(this.base64UrlDecode(headerB64));
       let sigBase64 = signatureB64.replace(/-/g, '+').replace(/_/g, '/');
       while (sigBase64.length % 4) sigBase64 += '=';
       const sigBuffer = Buffer.from(sigBase64, 'base64');
-      signatureValid = Ed25519Crypto.verify(signingInput, sigBuffer, issuerPublicKey);
+      signatureValid = header.alg === 'EdDSA'
+        ? Ed25519Crypto.verify(signingInput, sigBuffer, issuerPublicKey)
+        : header.alg === 'RS256'
+          ? crypto.verify('RSA-SHA256', Buffer.from(signingInput), issuerPublicKey, sigBuffer)
+          : false;
     } catch {
       signatureValid = false;
     }
@@ -216,8 +244,9 @@ export class SDJWTCrypto {
     }
 
     const now = Math.floor(Date.now() / 1000);
-    const notExpired = payload.exp ? now <= payload.exp : true;
-    if (!notExpired) {
+    const notExpired = typeof payload.exp === 'number' && now <= payload.exp;
+    const notBefore = typeof payload.nbf !== 'number' || now >= payload.nbf;
+    if (!notExpired || !notBefore) {
       return {
         valid: false,
         signatureValid: true,
@@ -226,25 +255,27 @@ export class SDJWTCrypto {
         issuerDid: payload.iss || '',
         disclosedClaims: {},
         undisclosedDigests: payload._sd || [],
-        errorMessage: `SD-JWT expired at timestamp ${payload.exp} (current time: ${now}).`
+        errorMessage: !notExpired
+          ? `SD-JWT expired at timestamp ${payload.exp} (current time: ${now}).`
+          : `SD-JWT is not valid before timestamp ${payload.nbf} (current time: ${now}).`
       };
     }
 
     // 3. Verify disclosures and match against _sd array
-    const validSDDigests: string[] = payload._sd || [];
+    const validSDDigests: string[] = Array.isArray(payload._sd) ? payload._sd : [];
     const disclosedClaims: Record<string, any> = {};
     const matchedDigests: string[] = [];
 
     // Include non-disclosable claims from payload
     for (const [key, value] of Object.entries(payload)) {
-      if (!['_sd', '_sd_alg', 'iss', 'sub', 'iat', 'nbf', 'exp'].includes(key)) {
+      if (!['_sd', '_sd_alg', 'iss', 'sub', 'iat', 'nbf', 'exp', 'cnf'].includes(key)) {
         disclosedClaims[key] = value;
       }
     }
 
     for (const rawDisclosure of presentedDisclosures) {
       const computedDigest = this.sha256Digest(rawDisclosure);
-      if (!validSDDigests.includes(computedDigest)) {
+      if (!validSDDigests.includes(computedDigest) || matchedDigests.includes(computedDigest)) {
         return {
           valid: false,
           signatureValid: true,
@@ -259,11 +290,18 @@ export class SDJWTCrypto {
 
       try {
         const decodedJson = JSON.parse(this.base64UrlDecode(rawDisclosure));
-        if (Array.isArray(decodedJson) && decodedJson.length === 3) {
-          const [, claimName, claimValue] = decodedJson;
-          disclosedClaims[claimName] = claimValue;
-          matchedDigests.push(computedDigest);
+        if (!Array.isArray(decodedJson) || decodedJson.length !== 3 ||
+            typeof decodedJson[0] !== 'string' ||
+            Buffer.from(decodedJson[0], 'base64url').length < 16 ||
+            typeof decodedJson[1] !== 'string' || !decodedJson[1]) {
+          throw new Error('Disclosure must contain a 128-bit salt, claim name, and value');
         }
+        const [, claimName, claimValue] = decodedJson;
+        if (Object.prototype.hasOwnProperty.call(disclosedClaims, claimName)) {
+          throw new Error(`Duplicate disclosed claim: ${claimName}`);
+        }
+        disclosedClaims[claimName] = claimValue;
+        matchedDigests.push(computedDigest);
       } catch (err: any) {
         return {
           valid: false,
