@@ -1,4 +1,5 @@
 import { ProtocolLogEntry } from '../types';
+import { currentFlowId } from './flow-context';
 
 export class ProtocolInspectorStore {
   private logs: ProtocolLogEntry[] = [];
@@ -7,6 +8,7 @@ export class ProtocolInspectorStore {
   public addLog(entry: Omit<ProtocolLogEntry, 'id' | 'timestamp'>): ProtocolLogEntry {
     const log: ProtocolLogEntry = {
       ...entry,
+      flowId: currentFlowId(),
       id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
       timestamp: new Date().toISOString()
     };
@@ -17,8 +19,9 @@ export class ProtocolInspectorStore {
     return log;
   }
 
-  public getLogs(protocol?: string, actor?: string): ProtocolLogEntry[] {
+  public getLogs(protocol?: string, actor?: string, flowId?: string): ProtocolLogEntry[] {
     return this.logs.filter(l => {
+      if (flowId && l.flowId !== flowId) return false;
       if (protocol && protocol !== 'ALL') {
         const normFilter = protocol.toLowerCase().replace(/[_\s-]/g, '');
         const normLog = (l.protocol || '').toLowerCase().replace(/[_\s-]/g, '');
@@ -38,6 +41,6 @@ export const inspectorStore = new ProtocolInspectorStore();
 
 export const ProtocolInspector = {
   record: (entry: Omit<ProtocolLogEntry, 'id' | 'timestamp'>) => inspectorStore.addLog(entry),
-  getLogs: (protocol?: string, actor?: string) => inspectorStore.getLogs(protocol, actor),
+  getLogs: (protocol?: string, actor?: string, flowId?: string) => inspectorStore.getLogs(protocol, actor, flowId),
   clear: () => inspectorStore.clearLogs()
 };

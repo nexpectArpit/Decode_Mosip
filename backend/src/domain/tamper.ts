@@ -1,3 +1,5 @@
+import { Ed25519Crypto } from '../crypto/ed25519';
+
 export type TamperAttackVector =
   | 'NONE'
   | 'INVALID_SIGNATURE'
@@ -25,9 +27,10 @@ export class CredentialTamperEngine {
     switch (attackVector) {
       case 'INVALID_SIGNATURE':
         if (mutated.proof?.proofValue) {
-          // Mutate the multibase signature string
-          const original = mutated.proof.proofValue;
-          mutated.proof.proofValue = original.slice(0, 10) + 'X' + original.slice(11);
+          const signature = Ed25519Crypto.decodeSignatureMultibase(mutated.proof.proofValue);
+          if (signature.length === 0) throw new Error('Credential proof signature is empty');
+          signature[0] ^= 0x01;
+          mutated.proof.proofValue = Ed25519Crypto.encodeSignatureMultibase(signature);
         } else if (mutated.combinedSDJWT) {
           // Flip a byte in the JWT signature segment
           const parts = mutated.combinedSDJWT.split('.');
@@ -38,7 +41,7 @@ export class CredentialTamperEngine {
           // Corrupt bytes in the CBOR hex
           const hex = mutated.rawCborHex;
           mutated.rawCborHex = hex.slice(0, 50) + 'ff00ff' + hex.slice(56);
-        }
+        } else throw new Error('Credential has no supported signature bytes to mutate');
         return {
           tamperedCredential: mutated,
           attackVector,
@@ -47,6 +50,7 @@ export class CredentialTamperEngine {
         };
 
       case 'EXPIRED_CREDENTIAL':
+        if (!mutated.expirationDate && !mutated.payload?.exp) throw new Error('Credential has no expiry field to mutate');
         if (mutated.expirationDate) {
           mutated.expirationDate = '2021-01-01T00:00:00Z';
         }
@@ -61,6 +65,7 @@ export class CredentialTamperEngine {
         };
 
       case 'ALTERED_CLAIMS':
+        if (!mutated.credentialSubject) throw new Error('Credential has no claims to mutate');
         if (mutated.credentialSubject) {
           if (mutated.credentialSubject.fullName) {
             mutated.credentialSubject.fullName = 'Impersonator Forged Name';
@@ -78,6 +83,7 @@ export class CredentialTamperEngine {
         };
 
       case 'CORRUPTED_DISCLOSURE':
+        if (!mutated.disclosures?.length || !mutated.combinedSDJWT) throw new Error('Corrupted disclosure requires an SD-JWT credential');
         if (mutated.disclosures && mutated.disclosures.length > 0) {
           // Tamper with the first disclosure string
           const first = mutated.disclosures[0];
@@ -93,6 +99,9 @@ export class CredentialTamperEngine {
           mutationDescription: 'Altered selective disclosure string; digest does not match signed _sd array.',
           expectedFailureReason: 'Disclosure tamper detected: digest is not in the signed _sd list.'
         };
+
+      case 'MISMATCHED_NONCE':
+        throw new Error('Nonce replay testing requires a live OpenID4VP challenge and is not implemented');
 
       case 'NONE':
       default:

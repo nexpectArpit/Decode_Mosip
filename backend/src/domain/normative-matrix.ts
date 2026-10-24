@@ -8,6 +8,7 @@ export interface NormativeRequirement {
   passed: boolean;
   evidence: any;
   failureReason?: string;
+  scope?: 'UPSTREAM_API' | 'LOCAL_REFERENCE' | 'WALLET_PRESENTATION';
 }
 
 export interface StandardsAuditSummary {
@@ -29,39 +30,39 @@ export class NormativeMatrixRegistry {
         clause: 'Section 11.2.2',
         title: 'Issuer Metadata Discovery',
         description: 'Issuer MUST publish metadata at /.well-known/openid-credential-issuer.',
-        tested: true,
-        passed: true,
-        evidence: { endpoint: '/.well-known/openid-credential-issuer' }
+        tested: false,
+        passed: false,
+        evidence: null
       },
       {
         id: 'OID4VCI-CONF-02',
         specification: 'OpenID4VCI',
         clause: 'Section 11.2.3',
         title: 'Credential Configurations Supported',
-        description: 'Metadata MUST declare supported formats (ldp_vc, vc+sd-jwt, mso_mdoc) and cryptographic suites.',
-        tested: true,
-        passed: true,
-        evidence: { formats: ['ldp_vc', 'vc+sd-jwt', 'mso_mdoc'] }
+        description: 'Metadata declares the credential configurations and formats actually supported by the issuer.',
+        tested: false,
+        passed: false,
+        evidence: null
       },
       {
         id: 'OID4VCI-OFFER-03',
         specification: 'OpenID4VCI',
         clause: 'Section 4.1',
         title: 'Credential Offer URI Scheme',
-        description: 'Issuer generates openid-credential-offer:// with pre-authorized_code grant.',
-        tested: true,
-        passed: true,
-        evidence: { scheme: 'openid-credential-offer://' }
+        description: 'Issuer generates a credential offer carrying a pre-authorized code grant.',
+        tested: false,
+        passed: false,
+        evidence: null
       },
       {
         id: 'OID4VCI-TOKEN-04',
         specification: 'OpenID4VCI',
         clause: 'Section 6.2',
         title: 'OAuth 2.0 Token Exchange',
-        description: 'Wallet exchanges pre-authorized code for issuance bearer token.',
-        tested: true,
-        passed: true,
-        evidence: { grant_type: 'urn:ietf:params:oauth:grant-type:pre-authorized_code' }
+        description: 'Wallet exchanges the pre-authorized code through the advertised authorization server and receives an issuance bearer token.',
+        tested: false,
+        passed: false,
+        evidence: null
       },
 
       // OpenID4VP (draft 21-23)
@@ -71,9 +72,9 @@ export class NormativeMatrixRegistry {
         clause: 'Section 5.1',
         title: 'Authorization Request Generation',
         description: 'Verifier generates openid4vp:// authorization request with client_id and nonce.',
-        tested: true,
-        passed: true,
-        evidence: { scheme: 'openid4vp://' }
+        tested: false,
+        passed: false,
+        evidence: null
       },
       {
         id: 'OID4VP-DEF-02',
@@ -81,9 +82,9 @@ export class NormativeMatrixRegistry {
         clause: 'Section 5.2',
         title: 'DIF Presentation Exchange 2.0',
         description: 'Presentation definition defines input_descriptors and format constraints.',
-        tested: true,
-        passed: true,
-        evidence: { spec: 'presentation_exchange_2.0' }
+        tested: false,
+        passed: false,
+        evidence: null
       },
       {
         id: 'OID4VP-DID-03',
@@ -91,9 +92,9 @@ export class NormativeMatrixRegistry {
         clause: 'Section 8.1',
         title: 'Verifier DID Resolution',
         description: 'Verifier publishes resolvable DID Document declaring verificationMethod.',
-        tested: true,
-        passed: true,
-        evidence: { didMethod: 'did:web' }
+        tested: false,
+        passed: false,
+        evidence: null
       },
       {
         id: 'OID4VP-RESP-04',
@@ -101,9 +102,9 @@ export class NormativeMatrixRegistry {
         clause: 'Section 6.1',
         title: 'VP Token Cryptographic Verification',
         description: 'Verifier verifies cryptographic signature and replay nonce on received presentation.',
-        tested: true,
-        passed: true,
-        evidence: { nonceValidation: true }
+        tested: false,
+        passed: false,
+        evidence: null
       },
 
       // W3C VC 1.1 / 2.0
@@ -113,39 +114,39 @@ export class NormativeMatrixRegistry {
         clause: 'Section 4',
         title: 'W3C VC Core Data Model',
         description: 'Payload contains @context, id, type, issuer, issuanceDate, and credentialSubject.',
-        tested: true,
-        passed: true,
-        evidence: { context: ['https://www.w3.org/2018/credentials/v1'] }
+        tested: false,
+        passed: false,
+        evidence: null
       },
       {
         id: 'W3C-JCS-02',
         specification: 'W3C_VC',
         clause: 'RFC 8785',
-        title: 'Deterministic JSON Canonicalization',
-        description: 'Document is canonicalized via JCS prior to hashing.',
-        tested: true,
-        passed: true,
-        evidence: { canonicalization: 'RFC 8785' }
+        title: 'Local RFC 8785 JSON Canonicalizer',
+        description: 'Local JSON helper produces deterministic JCS output; JSON-LD Ed25519Signature2020 uses its own linked-data canonicalization.',
+        tested: false,
+        passed: false,
+        evidence: null
       },
       {
         id: 'W3C-CRYPTO-03',
         specification: 'W3C_VC',
         clause: 'W3C Sec Suites',
         title: 'Ed25519Signature2020 Proof Suite',
-        description: 'Proof contains multibase base58btc signature verified against Ed25519 public key.',
-        tested: true,
-        passed: true,
-        evidence: { suite: 'Ed25519Signature2020' }
+        description: 'Live Certify Ed25519Signature2020 credential succeeds at Inji Verify and a modified proof fails.',
+        tested: false,
+        passed: false,
+        evidence: null
       },
       {
         id: 'W3C-TEMPORAL-04',
         specification: 'W3C_VC',
         clause: 'Section 4.7',
         title: 'Temporal Validity Enforcement',
-        description: 'Verifier rejects credentials with expirationDate in the past.',
-        tested: true,
-        passed: true,
-        evidence: { validation: 'expirationDate <= now' }
+        description: 'Local reference verifier rejects a credential with expirationDate in the past.',
+        tested: false,
+        passed: false,
+        evidence: null
       },
 
       // IETF SD-JWT VC
@@ -155,9 +156,9 @@ export class NormativeMatrixRegistry {
         clause: 'Section 5.1',
         title: '128-bit Salt & Disclosure Formation',
         description: 'Disclosures are formed as base64url(JSON([salt, claim_name, claim_value])).',
-        tested: true,
-        passed: true,
-        evidence: { saltLengthBytes: 16 }
+        tested: false,
+        passed: false,
+        evidence: null
       },
       {
         id: 'SDJWT-DIGEST-02',
@@ -165,9 +166,9 @@ export class NormativeMatrixRegistry {
         clause: 'Section 5.2',
         title: 'SHA-256 Disclosure Digest Array',
         description: 'Issuer calculates sha256(disclosure) and places digests in payload._sd.',
-        tested: true,
-        passed: true,
-        evidence: { digestAlgorithm: 'sha-256' }
+        tested: false,
+        passed: false,
+        evidence: null
       },
       {
         id: 'SDJWT-SIGN-03',
@@ -175,9 +176,9 @@ export class NormativeMatrixRegistry {
         clause: 'Section 5.3',
         title: 'Issuer JWS Signature',
         description: 'Issuer signs the JWT with EdDSA / Ed25519.',
-        tested: true,
-        passed: true,
-        evidence: { alg: 'EdDSA' }
+        tested: false,
+        passed: false,
+        evidence: null
       },
       {
         id: 'SDJWT-SELECT-04',
@@ -185,9 +186,9 @@ export class NormativeMatrixRegistry {
         clause: 'Section 7.1',
         title: 'Selective Disclosure Verification',
         description: 'Verifier matches presented disclosures against signed _sd digests without learning undisclosed claims.',
-        tested: true,
-        passed: true,
-        evidence: { selectiveDisclosureVerified: true }
+        tested: false,
+        passed: false,
+        evidence: null
       },
 
       // ISO/IEC 18013-5 mDoc
@@ -197,9 +198,9 @@ export class NormativeMatrixRegistry {
         clause: 'Section 9.1.2.4',
         title: 'Canonical CBOR IssuerSigned Items',
         description: 'IssuerSignedItem contains digestID, random salt, elementIdentifier, and elementValue.',
-        tested: true,
-        passed: true,
-        evidence: { encoding: 'CBOR Canonical' }
+        tested: false,
+        passed: false,
+        evidence: null
       },
       {
         id: 'MDOC-MSO-02',
@@ -207,9 +208,9 @@ export class NormativeMatrixRegistry {
         clause: 'Section 9.1.2.4',
         title: 'MobileSecurityObject ValueDigests',
         description: 'MSO maps digestID to SHA-256 digests across namespaces.',
-        tested: true,
-        passed: true,
-        evidence: { namespace: 'org.iso.18013.5.1' }
+        tested: false,
+        passed: false,
+        evidence: null
       },
       {
         id: 'MDOC-COSE-03',
@@ -217,9 +218,9 @@ export class NormativeMatrixRegistry {
         clause: 'Section 9.1.2.4',
         title: 'COSE_Sign1 Cryptographic Signature',
         description: 'IssuerAuth contains COSE_Sign1 structure verifying the MSO payload.',
-        tested: true,
-        passed: true,
-        evidence: { coseTag: 18 }
+        tested: false,
+        passed: false,
+        evidence: null
       },
       {
         id: 'MDOC-TEMP-04',
@@ -227,15 +228,14 @@ export class NormativeMatrixRegistry {
         clause: 'Section 9.1.2.4',
         title: 'ValidityInfo Interval Validation',
         description: 'Verifier validates validFrom <= now <= validUntil.',
-        tested: true,
-        passed: true,
-        evidence: { temporalCheck: true }
+        tested: false,
+        passed: false,
+        evidence: null
       }
     ];
   }
 
-  public static getSummaries(): StandardsAuditSummary[] {
-    const reqs = this.getRequirements();
+  public static getSummaries(reqs: NormativeRequirement[] = this.getRequirements()): StandardsAuditSummary[] {
     const specs: Array<NormativeRequirement['specification']> = [
       'OpenID4VCI',
       'OpenID4VP',

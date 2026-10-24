@@ -6,7 +6,7 @@ const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:4000';
 async function runCliMatrix() {
   console.log('\n===============================================================');
   console.log('  MOSIP Decode 2026 — Inji Interop Lab Test Runner              ');
-  console.log('  Problem Statement #2: Automated Matrix & Normative Audit     ');
+  console.log('  Problem Statement #2: Interoperability Matrix                    ');
   console.log('===============================================================\n');
 
   try {
@@ -15,19 +15,20 @@ async function runCliMatrix() {
     const health = await healthRes.json();
     console.log(`[+] System Health: Certify [${health.certify.status}], Mimoto [${health.mimoto.status}], Verify [${health.verify.status}], DB [${health.database.status}]\n`);
 
-    // 1. Fetch Normative Specifications Audit
-    console.log('[*] Fetching Normative Specification Requirements Audit...');
-    const standardsRes = await fetch(`${BACKEND_URL}/api/interop/standards`);
+    // 1. Execute the bounded standards probes
+    console.log('[*] Executing scoped standards probes...');
+    const standardsRes = await fetch(`${BACKEND_URL}/api/interop/report`);
     const standardsData = await standardsRes.json();
+    if (!standardsRes.ok) throw new Error(standardsData.error || `Standards audit failed (${standardsRes.status})`);
 
-    console.log('\n--- NORMATIVE SPECIFICATION CONFORMANCE ---');
+    console.log('\n--- EXECUTABLE STANDARDS PROBES ---');
     standardsData.summaries.forEach((s: any) => {
       console.log(`  • ${s.specName} (${s.specVersion}): ${s.passedRequirements}/${s.totalRequirements} requirements verified (${s.passRatePercentage}%)`);
     });
     console.log('-------------------------------------------\n');
 
     // 2. Execute Real Cryptographic Matrix
-    console.log('[*] Executing Live Cryptographic Matrix & Tamper Security Scenarios...');
+    console.log('[*] Executing interoperability scenarios...');
     const matrixRes = await fetch(`${BACKEND_URL}/api/interop/matrix/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' }
@@ -36,7 +37,7 @@ async function runCliMatrix() {
 
     console.log('\n---------------------------------------------------------------------------------------------------------');
     console.log(
-      '| # | ISSUER        | WALLET          | VERIFIER        | FORMAT    | ATTACK VECTOR      | EXPECT | RESULT |'
+      '| # | ISSUER        | WALLET          | VERIFIER        | FORMAT    | MODE     | ATTACK VECTOR      | EXPECT | RESULT |'
     );
     console.log('---------------------------------------------------------------------------------------------------------');
 
@@ -48,26 +49,36 @@ async function runCliMatrix() {
       const wallet = r.wallet.replace('INJI_', '').replace('MOCK_EXTERNAL_', 'EXT_').padEnd(15);
       const verifier = r.verifier.replace('INJI_', '').replace('MOCK_EXTERNAL_', 'EXT_').padEnd(15);
       const format = r.format.padEnd(9);
+      const mode = r.executionMode === 'LOCAL_REFERENCE_CRYPTO' ? 'LOCAL' :
+        r.executionMode?.startsWith('LOCAL_REFERENCE_WALLET_') ? 'WALLET' : 'API';
       const tamper = (r.tamperScenario || 'NONE').padEnd(18);
       const exp = r.expectedOutcome.padEnd(6);
       const statusIcon = r.passed ? 'PASS [OK]' : 'FAIL [X] ';
 
-      console.log(`| ${num}| ${issuer} | ${wallet} | ${verifier} | ${format} | ${tamper} | ${exp} | ${statusIcon} |`);
+      console.log(`| ${num}| ${issuer} | ${wallet} | ${verifier} | ${format} | ${mode.padEnd(8)} | ${tamper} | ${exp} | ${statusIcon} |`);
 
-      markdownRows += `| ${idx + 1} | \`${r.issuer}\` | \`${r.wallet}\` | \`${r.verifier}\` | \`${r.format}\` | \`${r.tamperScenario}\` | \`${r.expectedOutcome}\` | **${r.actualOutcome}** | ${r.passed ? '✅ PASS' : '❌ FAIL'} | ${r.latencyMs}ms |\n`;
+      const detail = (r.errorDetail || '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+      markdownRows += `| ${idx + 1} | \`${r.issuer}\` | \`${r.wallet}\` | \`${r.verifier}\` | \`${r.format}\` | \`${r.executionMode || 'DIRECT_API'}\` | \`${r.tamperScenario}\` | \`${r.expectedOutcome}\` | **${r.actualOutcome}** | ${r.passed ? '✅ PASS' : '❌ FAIL'} | ${r.latencyMs}ms | ${detail} |\n`;
     });
 
     console.log('---------------------------------------------------------------------------------------------------------');
     console.log(`\n>> Matrix Scenarios: ${data.passedTotal} / ${data.totalTests} passed`);
-    console.log(`>> Matrix Success Rate: ${data.matrixSuccessRate}%`);
+    console.log(`>> API Matrix Success Rate: ${data.matrixSuccessRate}%`);
+    const coverageText = data.walletTransportExercised
+      ? 'local reference-wallet OpenID4VP and mock SD-JWT OpenID4VCI/OpenID4VP paths; Inji Web/mobile transport is not exercised.'
+      : 'issuer/verifier APIs only; wallet transport and OpenID4VP presentation are not exercised.';
+    console.log(`>> Coverage: ${coverageText}`);
     console.log(`>> Execution Time: ${data.durationTotalMs}ms\n`);
 
     // Write markdown report
-    const reportPath = path.resolve(__dirname, '../../../docs/INTEROP_TEST_RESULTS.md');
+    const reportPath = process.env.MATRIX_REPORT_PATH ||
+      path.resolve(process.cwd(), '../docs/INTEROP_TEST_RESULTS.md');
+    fs.mkdirSync(path.dirname(reportPath), { recursive: true });
     
     let standardsMd = '';
     standardsData.summaries.forEach((s: any) => {
-      standardsMd += `| **${s.specName}** | ${s.specVersion} | ${s.passedRequirements}/${s.totalRequirements} | **${s.passRatePercentage}%** |\n`;
+      const scopes = [...new Set(standardsData.requirements.filter((r: any) => r.specification === s.spec).map((r: any) => r.scope))].join(', ');
+      standardsMd += `| **${s.specName}** | ${s.specVersion} | ${scopes} | ${s.passedRequirements}/${s.totalRequirements} | **${s.passRatePercentage}%** |\n`;
     });
 
     const mdContent = `# MOSIP Decode 2026: Verifiable Credentials Interoperability Matrix Report
@@ -78,46 +89,38 @@ async function runCliMatrix() {
 
 ---
 
-## 1. Normative Specifications Verification Audit
+**Coverage:** ${coverageText} An error before verification never counts as a passing rejection.
 
-| Specification | Version | Requirements Verified | Pass Rate |
-| :--- | :--- | :---: | :---: |
+**Local DID resolver repair:** The playground serves a compatibility-normalized DID document for the local Certify host, replacing Certify's bare-DID assertionMethod entry with its controlled verification-method references. The raw upstream defect remains recorded in docs/upstream-issue-drafts.md.
+
+## 1. Executable Standards Probes
+
+**Result:** ${standardsData.requirements.filter((r: any) => r.passed).length}/${standardsData.requirements.length} passed. Scopes: ${standardsData.coverage.upstreamApi} upstream API, ${standardsData.coverage.localReference} local reference, ${standardsData.coverage.walletPresentation} passing wallet presentation. These probes are not formal standards certification.
+
+| Specification | Version | Probe scopes | Requirements Verified | Pass Rate |
+| :--- | :--- | :--- | :---: | :---: |
 ${standardsMd}
+
+${standardsData.requirements.filter((r: any) => !r.passed).map((r: any) => `- **FAIL ${r.id}** [${r.scope}]: ${r.failureReason}`).join('\n')}
 
 ---
 
-## 2. Live Cryptographic Matrix Test Results
+## 2. Issuer and Verifier API Matrix Results
 
-| # | Issuer | Wallet | Verifier | Format | Tamper / Attack Vector | Expected | Actual | Outcome | Latency |
-|---|---|---|---|---|---|---|---|---|---|
+| # | Issuer | Wallet | Verifier | Format | Execution Mode | Tamper / Attack Vector | Expected | Actual | Outcome | Latency | Error Detail |
+|---|---|---|---|---|---|---|---|---|---|---|---|
 ${markdownRows}
 
 ---
 
-## 3. Cryptographic Verification Integrity Details
+## 3. Interpretation
 
-1. **W3C VC (Ed25519Signature2020)**:
-   - Canonicalized using RFC 8785 JSON Canonicalization Scheme (JCS).
-   - Signatures generated and verified mathematically with raw 32-byte Ed25519 keys.
-   - Tampered signatures correctly fail cryptographic verification without simulated flags.
-
-2. **IETF SD-JWT VC**:
-   - Disclosures formed as \`base64url(JSON([salt, claim_name, claim_value]))\` using 128-bit cryptographic salts.
-   - SHA-256 digests validated against the signed \`_sd\` array.
-   - Holder selectively presents disclosures; verifier reconstructs and matches digests while verifying JWS signature.
-
-3. **ISO/IEC 18013-5 mDoc**:
-   - Canonical CBOR encoding of \`IssuerSignedItem\` elements.
-   - ValueDigests in MobileSecurityObject (MSO) verified against individual claim item SHA-256 hashes.
-   - COSE_Sign1 structure verified using EdDSA / Ed25519 over \`Sig_structure\`.
-
-4. **Negative-Path Security Posture**:
-   - Verifiers receive credentials blindly without tamper flags.
-   - Signature corruption, claim mutation, disclosure alteration, and temporal expiration are detected through pure mathematical proof and temporal boundary checks.
+Only rows marked PASS met their expected outcome. ERROR means a service or flow failed before the expected verifier outcome could be observed. \`DIRECT_API\` rows do not exercise their wallet labels. \`LOCAL_REFERENCE_WALLET_OID4VCI_OID4VP\` executes the browser-reference wallet protocol path; it does not establish Inji Web or mobile interoperability.
 `;
 
     fs.writeFileSync(reportPath, mdContent, 'utf-8');
     console.log(`[+] Full markdown report written to: ${reportPath}\n`);
+    if (data.failedTotal > 0) process.exitCode = 1;
 
   } catch (err: any) {
     console.error('[-] Error executing test matrix:', err.message);
