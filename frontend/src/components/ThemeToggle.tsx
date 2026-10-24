@@ -15,6 +15,10 @@ export const ThemeToggle: React.FC = () => {
       mode === 'dark' ||
       (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
 
+    document
+      .querySelector('meta[name="theme-color"]')
+      ?.setAttribute('content', isDark ? '#140A24' : '#F8FAFC');
+
     if (isDark) {
       root.classList.add('dark');
     } else {
