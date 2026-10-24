@@ -7,14 +7,22 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
-    "test:matrix": "node dist/cli-test-runner.js"
+    "test:matrix": "node dist/cli-test-runner.js",
+    "test:vp-verifier": "npm run build && node --test dist/crypto/vp-verifier.test.js",
+    "test:mobile-proof-issuance": "node scripts/test-mobile-proof-issuance.mjs"
   },
   "dependencies": {
+    "@digitalbazaar/credentials-context": "^3.2.0",
+    "@digitalbazaar/ed25519-signature-2020": "^5.4.0",
+    "@digitalbazaar/ed25519-verification-key-2020": "^4.2.0",
+    "@digitalbazaar/security-context": "^1.0.1",
     "bs58": "^6.0.0",
     "cbor": "^10.0.12",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "jsonld": "^9.0.0",
+    "jsonld-signatures": "^11.6.0"
   },
   "devDependencies": {
     "@types/bs58": "^4.0.4",

@@ -1,0 +1,54 @@
+diff --git a/certify-service/src/main/java/io/mosip/certify/proof/DIDjwkProofManager.java b/certify-service/src/main/java/io/mosip/certify/proof/DIDjwkProofManager.java
+index 8e29ab7..d404e78 100644
+--- a/certify-service/src/main/java/io/mosip/certify/proof/DIDjwkProofManager.java
++++ b/certify-service/src/main/java/io/mosip/certify/proof/DIDjwkProofManager.java
+@@ -71,7 +71,17 @@ public class DIDjwkProofManager implements JwtProofKeyManager {
+             byte[] keyBytes = header.getJWK().toJSONString().getBytes(StandardCharsets.UTF_8);
+             return Optional.of(DID_JWK_PREFIX.concat(Base64.getUrlEncoder().encodeToString(keyBytes)));
+         } else if (header.getKeyID().startsWith(DID_JWK_PREFIX)) {
+-            return Optional.of(header.getKeyID());
++            String keyId = header.getKeyID();
++            int fragment = keyId.indexOf('#');
++            if (fragment < 0) {
++                return Optional.of(keyId);
++            }
++            if (keyId.indexOf('#', fragment + 1) != -1 || !"#0".equals(keyId.substring(fragment))) {
++                return Optional.empty();
++            }
++            // The proof references key #0; the credential subject is the
++            // holder DID itself. Keep the fragment only in the key reference.
++            return Optional.of(keyId.substring(0, fragment));
+         }
+         return Optional.empty();
+     }
+diff --git a/certify-service/src/test/java/io/mosip/certify/proof/DIDjwkProofManagerTest.java b/certify-service/src/test/java/io/mosip/certify/proof/DIDjwkProofManagerTest.java
+index 058dd02..226889a 100644
+--- a/certify-service/src/test/java/io/mosip/certify/proof/DIDjwkProofManagerTest.java
++++ b/certify-service/src/test/java/io/mosip/certify/proof/DIDjwkProofManagerTest.java
+@@ -109,6 +109,19 @@ public class DIDjwkProofManagerTest {
+         assertTrue(didJWK.startsWith("did:jwk:"));
+     }
+ 
++    @Test
++    void getDID_didjwk_keyid_with_fragment_returns_holder_did() throws NoSuchAlgorithmException {
++        RSAKey rsaJWK = getRsaKey();
++        String holderDid = "did:jwk:" + Base64.getUrlEncoder().encodeToString(
++                rsaJWK.toJSONString().getBytes(StandardCharsets.UTF_8));
++        when(header.getKeyID()).thenReturn(holderDid + "#0");
++        assertEquals(holderDid, manager.getDID(header).orElseThrow());
++        when(header.getKeyID()).thenReturn(holderDid + "#0#0");
++        assertTrue(manager.getDID(header).isEmpty());
++        when(header.getKeyID()).thenReturn(holderDid + "#other");
++        assertTrue(manager.getDID(header).isEmpty());
++    }
++
+     // TODO: implement this for did:key:<RSA-pub-key>
+ 
+     private static RSAKey getRsaKey() throws NoSuchAlgorithmException {
+@@ -123,4 +136,4 @@ public class DIDjwkProofManagerTest {
+         return rsaJWK;
+     }
+ 
+-}
+\ No newline at end of file
++}

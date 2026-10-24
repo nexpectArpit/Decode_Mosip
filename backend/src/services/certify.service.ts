@@ -1,18 +1,84 @@
 import * as crypto from 'crypto';
 import { ProtocolInspector } from '../middleware/inspector';
 import { IssuedCredentialPayload, CredentialFormat } from '../types';
-import { Ed25519Crypto, Ed25519KeyPair } from '../crypto/ed25519';
-import { W3CVCProtocol } from '../protocols/w3c-vc';
-import { MDocCrypto } from '../crypto/mdoc-cose';
-import { SDJWTCrypto } from '../crypto/sd-jwt';
+import { currentFlowId } from '../middleware/flow-context';
 
 const CERTIFY_BASE_URL = process.env.CERTIFY_URL || 'http://localhost:8090/v1/certify';
 const CERTIFY_NGINX_URL = process.env.CERTIFY_NGINX_URL || 'http://localhost:8091';
 
+type IssueParams = {
+  credentialType: 'FarmerCredential' | 'MockMdl' | 'NationalId';
+  format?: CredentialFormat;
+  uin?: string;
+  subjectData?: Record<string, any>;
+};
+
 export class CertifyService {
-  // Deterministic seed for Inji Certify local signer
-  private static readonly CERTIFY_SEED = Buffer.from('1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d', 'hex');
-  public static readonly keyPair: Ed25519KeyPair = Ed25519Crypto.fromSeed(CertifyService.CERTIFY_SEED);
+  public static async assertMobileIssuerConfiguration(publicIssuerUrl: string): Promise<void> {
+    const publicIssuer = new URL(publicIssuerUrl);
+    const origin = publicIssuer.origin;
+    const [metadata, oauth, didDocument] = await Promise.all([
+      this.getWellKnownIssuer(), this.getAuthorizationServerMetadata(), this.getUpstreamDidDocument()
+    ]);
+    if ((metadata.credential_issuer !== origin && metadata.credential_issuer !== `${origin}/v1/certify`) ||
+        !Array.isArray(metadata.authorization_servers) ||
+        !metadata.authorization_servers.includes(origin) ||
+        oauth.issuer !== origin ||
+        oauth.token_endpoint !== `${origin}/v1/certify/oauth/token` ||
+        didDocument.id !== process.env.CERTIFY_PUBLIC_DID) {
+      throw new Error('Certify is not advertising the configured public issuer, authorization server, token endpoint, and DID. Restart Compose with matching CERTIFY_PUBLIC_ORIGIN and CERTIFY_PUBLIC_DID.');
+    }
+  }
+
+  public static async createMobileCredentialOffer(params: { uin: string; fullName: string; publicIssuerUrl: string }): Promise<string> {
+    const publicIssuer = new URL(params.publicIssuerUrl);
+    if (publicIssuer.protocol !== 'https:' || publicIssuer.pathname.replace(/\/$/, '') !== '/v1/certify' ||
+        /^(localhost|127\.|certify-nginx$|certify$|playground-backend$)/i.test(publicIssuer.hostname)) {
+      throw new Error('Configure a phone-reachable HTTPS origin for the mobile protocol edge before creating a mobile offer.');
+    }
+    const publicDid = process.env.CERTIFY_PUBLIC_DID || '';
+    if (publicDid !== `did:web:${publicIssuer.hostname.toLowerCase()}`) {
+      throw new Error(`Set CERTIFY_PUBLIC_DID=did:web:${publicIssuer.hostname.toLowerCase()} and restart Compose so the phone can resolve the signed credential issuer.`);
+    }
+    if (process.env.CERTIFY_PUBLIC_ORIGIN !== publicIssuer.origin) {
+      throw new Error(`Set CERTIFY_PUBLIC_ORIGIN=${publicIssuer.origin} and restart Compose so Certify advertises the same public issuer and proof audience.`);
+    }
+    await this.assertMobileIssuerConfiguration(publicIssuer.toString());
+    const preAuthUrl = `${CERTIFY_BASE_URL}/pre-authorized-data`;
+    const payload = {
+      credential_configuration_id: 'FarmerCredential',
+      claims: {
+        id: params.uin, fullName: params.fullName, mobileNumber: `98${params.uin.slice(-8)}`,
+        dateOfBirth: '1978-08-20', gender: 'Male', state: 'Karnataka', district: 'Bangalore',
+        villageOrTown: 'Koramangala', postalCode: '453000', landArea: '3 hectares',
+        landOwnershipType: 'Owner', primaryCropType: 'Maize', secondaryCropType: 'Rice', face: '', farmerID: params.uin
+      },
+      expires_in: 600
+    };
+    ProtocolInspector.record({ protocol: 'OpenID4VCI', step: 'Inji Certify: Create pre-authorized mobile offer', actor: 'ISSUER', direction: 'REQUEST', endpoint: preAuthUrl, method: 'POST', headers: { 'Content-Type': 'application/json' }, payload });
+    const response = await fetch(preAuthUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const data: any = await response.json();
+    if (!response.ok || typeof data.credential_offer_uri !== 'string') throw new Error(`Inji Certify offer creation failed (${response.status}): ${JSON.stringify(data)}`);
+    const offerUri = new URL(data.credential_offer_uri);
+    const embeddedOfferUrl = offerUri.searchParams.get('credential_offer_uri');
+    if (!embeddedOfferUrl) throw new Error('Inji Certify returned an offer URI without credential_offer_uri');
+    const offerUrl = new URL(embeddedOfferUrl);
+    const offerId = offerUrl.pathname.match(/\/credential-offer-data\/([^/]+)$/)?.[1];
+    const gatewayUrl = process.env.CERTIFY_GATEWAY_URL;
+    if (gatewayUrl) {
+      if (!offerId || !currentFlowId()) throw new Error('Could not associate the mobile offer with its protocol trace');
+      const registered = await fetch(`${gatewayUrl}/internal/register-offer`, { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ offerId, flowId: currentFlowId() }) });
+      if (!registered.ok) throw new Error(`Could not register mobile offer trace (${registered.status})`);
+    }
+    const reachableBase = publicIssuer.toString().replace(/\/$/, '');
+    const path = offerUrl.pathname.replace(/^\/v1\/certify/, '');
+    const reachableOfferUrl = `${reachableBase}${path}${offerUrl.search}`;
+    const mobileUri = `openid-credential-offer://?credential_offer_uri=${encodeURIComponent(reachableOfferUrl)}`;
+    ProtocolInspector.record({ protocol: 'OpenID4VCI', step: 'Inji Certify: Mobile credential offer QR ready', actor: 'ISSUER', direction: 'RESPONSE', endpoint: preAuthUrl, method: 'POST', headers: Object.fromEntries(response.headers.entries()), payload: { credential_offer_uri: mobileUri, expiresInSeconds: 600 }, status: response.status });
+    return mobileUri;
+  }
 
   public static async getWellKnownIssuer(): Promise<any> {
     const start = Date.now();
@@ -32,6 +98,7 @@ export class CertifyService {
     try {
       const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
       const data = await res.json();
+      if (!res.ok) throw new Error(`Issuer metadata request failed (${res.status})`);
 
       ProtocolInspector.record({
         protocol: 'OpenID4VCI',
@@ -64,37 +131,61 @@ export class CertifyService {
     }
   }
 
+  public static async getAuthorizationServerMetadata(): Promise<any> {
+    const url = `${CERTIFY_NGINX_URL}/v1/certify/.well-known/oauth-authorization-server`;
+    const response = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!response.ok) throw new Error(`Certify OAuth metadata request failed (${response.status})`);
+    return response.json();
+  }
+
   public static async getDidDocument(): Promise<any> {
     const url = `${CERTIFY_NGINX_URL}/.well-known/did.json`;
 
     try {
       const res = await fetch(url);
       const data = await res.json();
+      if (!res.ok) throw new Error(`DID document request failed (${res.status})`);
       return data;
     } catch (err: any) {
-      return {
-        id: 'did:web:certify-nginx',
-        verificationMethod: [{
-          id: 'did:web:certify-nginx#key-0',
-          type: 'Ed25519VerificationKey2020',
-          controller: 'did:web:certify-nginx',
-          publicKeyMultibase: this.keyPair.publicKeyMultibase
-        }]
-      };
+      throw new Error(`Inji Certify DID discovery failed: ${err.message}`);
     }
   }
 
-  public static async issueCredential(params: {
-    credentialType: 'FarmerCredential' | 'MockMdl' | 'NationalId';
-    format?: CredentialFormat;
-    uin?: string;
-    holderDid?: string;
-    subjectData?: Record<string, any>;
-  }): Promise<IssuedCredentialPayload> {
+  /** Fetch Certify's raw DID document for the local resolver compatibility adapter. */
+  public static async getUpstreamDidDocument(): Promise<any> {
+    const url = `${CERTIFY_BASE_URL}/.well-known/did.json`;
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    const data = await res.json();
+    if (!res.ok || !data || typeof data !== 'object') {
+      throw new Error(`Raw Certify DID document request failed (${res.status})`);
+    }
+    return data;
+  }
+
+  public static async issueCredential(params: IssueParams): Promise<IssuedCredentialPayload> {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        return await this.issueCredentialOnce(params);
+      } catch (error: any) {
+        const transientContextFailure = error.message?.includes('ERROR_SIGNING_QR_DATA') &&
+          error.message?.includes('canonicalization');
+        if (!transientContextFailure || attempt === 3) throw error;
+        ProtocolInspector.record({ protocol: 'SYSTEM', step: `Retry Certify issuance after remote JSON-LD context error (${attempt}/2)`,
+          actor: 'ISSUER', direction: 'INTERNAL', endpoint: 'local:CertifyService.issueCredential',
+          method: 'LOCAL', headers: {}, payload: { reason: 'ERROR_SIGNING_QR_DATA' } });
+        await new Promise(resolve => setTimeout(resolve, attempt * 750));
+      }
+    }
+    throw new Error('Inji Certify issuance retry loop ended unexpectedly');
+  }
+
+  private static async issueCredentialOnce(params: IssueParams): Promise<IssuedCredentialPayload> {
     const start = Date.now();
     const uin = params.subjectData?.uin || params.uin || '9876543210';
     const fullName = params.subjectData?.fullName || 'Ramesh Patel';
-    const holderDid = params.holderDid || 'did:key:z6MkqFLQZ83XN';
+    if (params.format && params.format !== 'ldp_vc') {
+      throw new Error(`Inji Certify ${params.format} issuance is not wired to an upstream credential configuration. Select the external mock issuer for this format.`);
+    }
 
     // When FarmerCredential (ldp_vc) is requested, attempt live Inji Certify OpenID4VCI issuance
     if (params.credentialType === 'FarmerCredential' || (!params.format || params.format === 'ldp_vc')) {
@@ -104,10 +195,21 @@ export class CertifyService {
         const preAuthPayload = {
           credential_configuration_id: 'FarmerCredential',
           claims: {
+            id: uin,
             fullName,
+            mobileNumber: `98${uin.slice(-8)}`,
             dateOfBirth: '1978-08-20',
             gender: 'Male',
-            phone: `+91-98${uin.slice(-8)}`
+            state: 'Karnataka',
+            district: 'Bangalore',
+            villageOrTown: 'Koramangala',
+            postalCode: '453000',
+            landArea: '3 hectares',
+            landOwnershipType: 'Owner',
+            primaryCropType: 'Maize',
+            secondaryCropType: 'Rice',
+            face: '',
+            farmerID: uin
           },
           expires_in: 600
         };
@@ -129,6 +231,9 @@ export class CertifyService {
           body: JSON.stringify(preAuthPayload)
         });
         const preAuthData: any = await preAuthRes.json();
+        if (!preAuthRes.ok || !preAuthData.credential_offer_uri) {
+          throw new Error(`Pre-authorization failed (${preAuthRes.status}): ${JSON.stringify(preAuthData)}`);
+        }
 
         ProtocolInspector.record({
           protocol: 'OpenID4VCI',
@@ -150,6 +255,7 @@ export class CertifyService {
           const offerUrl = `${CERTIFY_BASE_URL}/credential-offer-data/${offerId}`;
           const offerRes = await fetch(offerUrl);
           const offerData: any = await offerRes.json();
+          if (!offerRes.ok) throw new Error(`Credential offer failed (${offerRes.status}): ${JSON.stringify(offerData)}`);
 
           ProtocolInspector.record({
             protocol: 'OpenID4VCI',
@@ -164,6 +270,7 @@ export class CertifyService {
           });
 
           const preAuthCode = offerData.grants?.['urn:ietf:params:oauth:grant-type:pre-authorized_code']?.['pre-authorized_code'];
+          if (!preAuthCode) throw new Error('Credential offer did not contain a pre-authorized code');
 
           // Step 3: Exchange Pre-Auth Code for Access Token
           const tokenUrl = `${CERTIFY_BASE_URL}/oauth/token`;
@@ -186,6 +293,9 @@ export class CertifyService {
             body: tokenBody
           });
           const tokenData: any = await tokenRes.json();
+          if (!tokenRes.ok || !tokenData.access_token || !tokenData.c_nonce) {
+            throw new Error(`Token exchange failed (${tokenRes.status}): ${JSON.stringify(tokenData)}`);
+          }
 
           ProtocolInspector.record({
             protocol: 'OpenID4VCI',
@@ -209,7 +319,7 @@ export class CertifyService {
 
           const proofHeader = { alg: 'RS256', typ: 'openid4vci-proof+jwt', jwk: rawJwk };
           const proofPayload = {
-            aud: 'http://certify-nginx:80',
+            aud: process.env.CERTIFY_PUBLIC_ORIGIN || 'http://certify-nginx:80',
             nonce: cNonce,
             iat: Math.floor(Date.now() / 1000)
           };
@@ -254,8 +364,11 @@ export class CertifyService {
             body: JSON.stringify(credReqBody)
           });
 
-          if (credRes.ok) {
+          {
             const credData: any = await credRes.json();
+            if (!credRes.ok || !credData.credential) {
+              throw new Error(`Credential issuance failed (${credRes.status}): ${JSON.stringify(credData)}`);
+            }
             const liveVc = credData.credential || credData;
 
             ProtocolInspector.record({
@@ -266,7 +379,7 @@ export class CertifyService {
               endpoint: credUrl,
               method: 'POST',
               headers: Object.fromEntries(credRes.headers.entries()),
-              payload: { id: liveVc.id, issuer: liveVc.issuer, proofType: liveVc.proof?.type },
+              payload: { id: liveVc.id, issuer: liveVc.issuer, proofType: liveVc.proof?.type, subjectKeys: Object.keys(liveVc.credentialSubject || {}) },
               status: credRes.status,
               durationMs: Date.now() - start
             });
@@ -275,130 +388,22 @@ export class CertifyService {
             const rawSubject = liveVc.credentialSubject || {};
             const isUnrendered = typeof rawSubject.primaryCropType === 'string' && rawSubject.primaryCropType.includes('${');
             
-            if (!isUnrendered && rawSubject.fullName === fullName) {
+            if (!isUnrendered && rawSubject.fullName === fullName && liveVc.proof) {
               return {
                 ...liveVc,
                 format: 'ldp_vc',
                 issuerImplementation: 'INJI_CERTIFY'
               };
             }
+            throw new Error(`Inji Certify credential did not match the requested subject (proof=${Boolean(liveVc.proof)}, unresolvedTemplate=${isUnrendered}, subjectKeys=${Object.keys(rawSubject).join(',')}, fullNameMatched=${rawSubject.fullName === fullName})`);
           }
         }
       } catch (err: any) {
-        console.warn('[CertifyService] Live Inji Certify error, falling back to local crypto engine:', err.message);
+        throw new Error(`Inji Certify issuance failed: ${err.message}`);
       }
     }
 
-    // Dynamic multi-format handling (mso_mdoc, vc+sd-jwt, ldp_vc)
-    if (params.credentialType === 'MockMdl' || params.format === 'mso_mdoc') {
-      const nameParts = fullName.trim().split(' ');
-      const given_name = nameParts[0] || 'Rajesh';
-      const family_name = nameParts.slice(1).join(' ') || 'Sharma';
+    throw new Error('Inji Certify issuance did not complete');
 
-      const claims = {
-        family_name,
-        given_name,
-        birth_date: '1985-04-12',
-        driving_privileges: [{ vehicle_category_code: 'MCWG' }, { vehicle_category_code: 'LMV' }],
-        issue_date: new Date().toISOString().split('T')[0],
-        expiry_date: new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString().split('T')[0],
-        issuing_authority: 'State Transport Department, India',
-        document_number: `DL-${uin.slice(-6)}`
-      };
-
-      const mdoc = MDocCrypto.issueMDoc({
-        issuerKeyPair: this.keyPair,
-        docType: 'org.iso.18013.5.1.mDL',
-        claims
-      });
-
-      return {
-        id: `urn:uuid:${crypto.randomUUID()}`,
-        format: 'mso_mdoc',
-        type: ['org.iso.18013.5.1.mDL'],
-        issuer: 'did:web:certify-nginx',
-        issuanceDate: new Date().toISOString(),
-        rawCborHex: mdoc.rawCborHex,
-        mso: mdoc.mso,
-        credentialSubject: {
-          doctype: 'org.iso.18013.5.1.mDL',
-          ...claims
-        },
-        proof: {
-          type: 'COSE_Sign1',
-          created: new Date().toISOString(),
-          verificationMethod: 'did:web:certify-nginx#nSoaKUnYTp0AAfT029J9JDSZyBYWnG9wPVYKMT6lbXs',
-          algorithm: 'EdDSA'
-        },
-        issuerImplementation: 'INJI_CERTIFY'
-      };
-    } else if (params.format === 'vc+sd-jwt' || params.credentialType === 'NationalId') {
-      const claims = {
-        fullName,
-        nationalId: `UIN-${uin}`,
-        dateOfBirth: '1985-04-12',
-        state: 'Maharashtra',
-        district: 'Nashik'
-      };
-
-      const sdjwt = SDJWTCrypto.issueSDJWT({
-        issuerKeyPair: this.keyPair,
-        holderDid,
-        claims,
-        disclosableClaimKeys: ['nationalId', 'dateOfBirth']
-      });
-
-      return {
-        id: `urn:uuid:${crypto.randomUUID()}`,
-        format: 'vc+sd-jwt',
-        type: ['VerifiableCredential', 'NationalIdCredential'],
-        issuer: 'did:web:certify-nginx',
-        issuanceDate: new Date().toISOString(),
-        combinedSDJWT: sdjwt.combinedSDJWT,
-        issuerSignedJwt: sdjwt.issuerSignedJwt,
-        disclosures: sdjwt.disclosures,
-        payload: sdjwt.payload,
-        credentialSubject: {
-          id: holderDid,
-          ...claims
-        },
-        proof: {
-          type: 'Ed25519Signature2020',
-          verificationMethod: 'did:web:certify-nginx#nSoaKUnYTp0AAfT029J9JDSZyBYWnG9wPVYKMT6lbXs'
-        },
-        issuerImplementation: 'INJI_CERTIFY'
-      };
-    } else {
-      // Local cryptographic W3C VC engine using Inji Certify's published verificationMethod
-      const claims = {
-        farmerID: `FARMER-${uin}`,
-        fullName,
-        mobileNumber: `+91-98${uin.slice(-8)}`,
-        dateOfBirth: '1978-08-20',
-        gender: 'Male',
-        state: 'Maharashtra',
-        district: 'Nashik',
-        villageOrTown: 'Dindori',
-        postalCode: '422202',
-        landArea: '4.8 Hectares',
-        landOwnershipType: 'Freehold Agricultural',
-        primaryCropType: 'Paddy & Soybean',
-        secondaryCropType: 'Sugarcane'
-      };
-
-      const signedW3C = W3CVCProtocol.issueCredential({
-        issuerKeyPair: this.keyPair,
-        holderDid,
-        type: ['FarmerCredential'],
-        claims,
-        issuerDid: 'did:web:certify-nginx'
-      });
-
-      return {
-        ...signedW3C,
-        format: 'ldp_vc',
-        issuerImplementation: 'INJI_CERTIFY'
-      };
-    }
   }
 }
