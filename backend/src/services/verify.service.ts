@@ -1,12 +1,5 @@
-import * as crypto from 'crypto';
 import { ProtocolInspector } from '../middleware/inspector';
-import { VerificationResultPayload, CredentialFormat } from '../types';
-import { W3CVCProtocol, W3CVerificationResult } from '../protocols/w3c-vc';
-import { SDJWTCrypto, SDJWTVerificationResult } from '../crypto/sd-jwt';
-import { MDocCrypto, MDocVerificationResult } from '../crypto/mdoc-cose';
-import { Ed25519Crypto } from '../crypto/ed25519';
-import { CertifyService } from './certify.service';
-import { MockExternalService } from './mock-external.service';
+import { VerificationResultPayload } from '../types';
 
 const VERIFY_BASE_URL = process.env.VERIFY_URL || 'http://localhost:8095/v1/verify';
 
@@ -16,7 +9,7 @@ export class VerifyService {
     const url = `${VERIFY_BASE_URL}/did.json`;
 
     ProtocolInspector.record({
-      protocol: 'OpenID4VP',
+      protocol: 'SYSTEM',
       step: 'Verifier DID Document Discovery',
       actor: 'VERIFIER',
       direction: 'REQUEST',
@@ -29,9 +22,10 @@ export class VerifyService {
     try {
       const res = await fetch(url);
       const data = await res.json();
+      if (!res.ok) throw new Error(`DID document request failed (${res.status})`);
 
       ProtocolInspector.record({
-        protocol: 'OpenID4VP',
+        protocol: 'SYSTEM',
         step: 'Verifier DID Document Response',
         actor: 'VERIFIER',
         direction: 'RESPONSE',
@@ -44,184 +38,82 @@ export class VerifyService {
       });
 
       return data;
-    } catch {
-      return {
-        id: 'did:web:verify-service:v1:verify',
-        verificationMethod: [{
-          id: 'did:web:verify-service:v1:verify#key-0',
-          type: 'Ed25519VerificationKey2020',
-          controller: 'did:web:verify-service:v1:verify'
-        }]
-      };
+    } catch (err: any) {
+      throw new Error(`Inji Verify DID discovery failed: ${err.message}`);
     }
   }
 
-  /**
-   * Cryptographically verifies an incoming credential presentation.
-   * NOTE: Does NOT receive any 'tamperScenario' flag! Validity is determined
-   * entirely by mathematical verification of signature bytes, digests, and timestamps.
-   */
+  /** Submit a W3C credential to the actual Inji Verify service. */
   public static async verifyVC(vcPayload: any): Promise<VerificationResultPayload> {
+    if (!vcPayload || typeof vcPayload !== 'object') throw new Error('Missing credential');
+    const format = vcPayload.format || 'ldp_vc';
+    if (format !== 'ldp_vc' && format !== 'vc+sd-jwt') {
+      throw new Error(`Inji Verify ${format} verification is not wired to a live upstream flow`);
+    }
     const start = Date.now();
     const url = `${VERIFY_BASE_URL}/vc-verification`;
-
+    const credential = { ...vcPayload };
+    delete credential.format;
+    delete credential.issuerImplementation;
+    const sdJwt = vcPayload.format === 'vc+sd-jwt' ? vcPayload.combinedSDJWT : undefined;
+    if (vcPayload.format === 'vc+sd-jwt' && typeof sdJwt !== 'string') {
+      throw new Error('Inji Verify SD-JWT verification requires a compact SD-JWT VC string');
+    }
+    const contentType = vcPayload.format === 'vc+sd-jwt' ? 'application/vc+sd-jwt' : 'text/plain';
+    const requestBody = sdJwt || JSON.stringify(credential);
     ProtocolInspector.record({
-      protocol: 'OpenID4VP',
-      step: 'Inji Verify: Cryptographic Verification Invocated',
-      actor: 'VERIFIER',
-      direction: 'REQUEST',
-      endpoint: url,
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      payload: { credentialId: vcPayload.id, format: vcPayload.format }
+      protocol: 'W3C_VC', step: 'Submit VC to Inji Verify', actor: 'VERIFIER',
+      direction: 'REQUEST', endpoint: url, method: 'POST',
+      headers: { 'Content-Type': contentType }, payload: vcPayload.format === 'vc+sd-jwt'
+        ? { format, compactSDJWT: sdJwt } : credential
     });
-
-    // 1. Resolve Issuer Public Key
-    const issuerDid: string = vcPayload.issuer || '';
-    let issuerPublicKey = CertifyService.keyPair.publicKeyObject;
-    if (issuerDid.includes('external-issuer') || vcPayload.issuerImplementation === 'MOCK_EXTERNAL_OID4VCI') {
-      issuerPublicKey = MockExternalService.issuerKeyPair.publicKeyObject;
+    const response = await fetch(url, {
+      method: 'POST', headers: { 'Content-Type': contentType },
+      body: requestBody
+    });
+    const raw = await response.text();
+    let data: any;
+    try { data = JSON.parse(raw); } catch {
+      throw new Error(`Inji Verify returned non-JSON response (${response.status}): ${raw.slice(0, 300)}`);
     }
-
-    const format: CredentialFormat = vcPayload.format || 'ldp_vc';
-    let isValid = false;
-    let actualStatus: 'VALID' | 'INVALID' | 'EXPIRED' | 'TAMPERED' = 'VALID';
-    let diagnosticMessage: string | undefined;
-    let verifiedClaims: Record<string, any> = {};
-
-    // 2. Perform Real Cryptographic Verification by Format
-    if (format === 'vc+sd-jwt' && vcPayload.combinedSDJWT) {
-      const sdResult: SDJWTVerificationResult = SDJWTCrypto.verifySDJWT(
-        vcPayload.combinedSDJWT,
-        issuerPublicKey
-      );
-
-      isValid = sdResult.valid;
-      if (!isValid) {
-        if (!sdResult.signatureValid || !sdResult.disclosuresValid) {
-          actualStatus = 'TAMPERED';
-        } else if (!sdResult.notExpired) {
-          actualStatus = 'EXPIRED';
-        } else {
-          actualStatus = 'INVALID';
-        }
-        diagnosticMessage = sdResult.errorMessage;
-      }
-      verifiedClaims = sdResult.disclosedClaims;
-    } else if (format === 'mso_mdoc' && vcPayload.rawCborHex) {
-      const mdocResult: MDocVerificationResult = MDocCrypto.verifyMDoc(
-        vcPayload.rawCborHex,
-        issuerPublicKey
-      );
-
-      isValid = mdocResult.valid;
-      if (!isValid) {
-        if (!mdocResult.signatureValid || !mdocResult.digestsValid) {
-          actualStatus = 'TAMPERED';
-        } else if (!mdocResult.notExpired) {
-          actualStatus = 'EXPIRED';
-        } else {
-          actualStatus = 'INVALID';
-        }
-        diagnosticMessage = mdocResult.errorMessage;
-      }
-      verifiedClaims = mdocResult.claims;
-    } else {
-      // W3C JSON-LD VC — Invoke Live Inji Verify Service
-      let liveVerifyHandled = false;
-      try {
-        const verifyRes = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain' },
-          body: typeof vcPayload === 'string' ? vcPayload : JSON.stringify(vcPayload)
-        });
-
-        if (verifyRes.ok) {
-          const directResult: any = await verifyRes.json();
-          if (directResult.verificationStatus === 'SUCCESS') {
-            liveVerifyHandled = true;
-            isValid = true;
-            actualStatus = 'VALID';
-            diagnosticMessage = 'Inji Verify Service verified Ed25519Signature2020 proof and W3C data model successfully.';
-            verifiedClaims = vcPayload.credentialSubject || {};
-          }
-        }
-      } catch (err: any) {
-        console.warn('[VerifyService] Inji Verify network call error, falling back to local crypto engine:', err.message);
-      }
-
-      if (!liveVerifyHandled) {
-        const w3cResult: W3CVerificationResult = W3CVCProtocol.verifyCredential(
-          vcPayload,
-          issuerPublicKey
-        );
-
-        isValid = w3cResult.valid;
-        if (!isValid) {
-          if (!w3cResult.signatureValid) {
-            actualStatus = 'TAMPERED';
-          } else if (!w3cResult.notExpired) {
-            actualStatus = 'EXPIRED';
-          } else {
-            actualStatus = 'INVALID';
-          }
-          diagnosticMessage = w3cResult.errorMessage;
-        }
-        verifiedClaims = w3cResult.claims;
-      }
+    ProtocolInspector.record({
+      protocol: format === 'vc+sd-jwt' ? 'SD_JWT' : 'W3C_VC', step: 'Inji Verify VC result', actor: 'VERIFIER',
+      direction: 'RESPONSE', endpoint: url, method: 'POST',
+      headers: Object.fromEntries(response.headers.entries()), payload: data,
+      status: response.status, durationMs: Date.now() - start
+    });
+    const upstreamStatus = data?.verificationStatus;
+    if (!['SUCCESS', 'INVALID', 'EXPIRED', 'REVOKED'].includes(upstreamStatus)) {
+      throw new Error(`Inji Verify did not return a verification result (${response.status}): ${JSON.stringify(data)}`);
     }
-
-    const result: VerificationResultPayload = {
-      valid: isValid,
-      status: actualStatus,
-      format,
-      verifier: 'INJI_VERIFY',
+    const valid = response.ok && upstreamStatus === 'SUCCESS';
+    const status = valid ? 'VALID' : upstreamStatus === 'EXPIRED' ? 'EXPIRED' : upstreamStatus === 'REVOKED' ? 'REVOKED' : 'INVALID';
+    return {
+      valid, status, format, verifier: 'INJI_VERIFY',
       cryptographicCheck: {
-        signatureValid: isValid || actualStatus === 'EXPIRED',
-        signatureSuite: vcPayload.proof?.type || 'Ed25519Signature2020',
-        issuerDid,
-        tamperDetected: !isValid && actualStatus !== 'EXPIRED',
-        message: diagnosticMessage || 'Cryptographic signature and canonical digest successfully verified against issuer root key.'
+        signatureValid: null, signatureSuite: credential.proof?.type || (format === 'vc+sd-jwt' ? 'SD-JWT JWS' : 'Unknown'),
+        issuerDid: credential.issuer || (format === 'vc+sd-jwt' ? 'x5c certificate issuer' : ''), tamperDetected: null,
+        message: `Inji Verify returned ${upstreamStatus}; individual proof checks were not exposed by this response`
       },
       claimsCheck: {
-        issuerTrusted: true,
-        subjectMatched: true,
-        notExpired: actualStatus !== 'EXPIRED',
-        claims: verifiedClaims
+        issuerTrusted: null, subjectMatched: null, notExpired: status === 'EXPIRED' ? false : null,
+        claims: valid ? credential.credentialSubject || {} : {}
       },
-      rawVpToken: {
-        type: ['VerifiablePresentation'],
-        verifiableCredential: [vcPayload]
-      },
-      durationMs: Date.now() - start,
-      timestamp: new Date().toISOString()
+      durationMs: Date.now() - start, timestamp: new Date().toISOString()
     };
-
-    ProtocolInspector.record({
-      protocol: 'OpenID4VP',
-      step: `Inji Verify: Mathematical Cryptographic Verification [Outcome: ${actualStatus}]`,
-      actor: 'VERIFIER',
-      direction: 'RESPONSE',
-      endpoint: url,
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      payload: result,
-      status: isValid ? 200 : 422,
-      durationMs: result.durationMs
-    });
-
-    return result;
   }
 
   public static async createVPRequest(params: {
     clientId: string;
     presentationDefinition?: any;
+    acceptVPWithoutHolderProof?: boolean;
   }): Promise<any> {
     const start = Date.now();
     const url = `${VERIFY_BASE_URL}/vp-request`;
 
     const body = {
       clientId: params.clientId || 'playground-verifier',
+      acceptVPWithoutHolderProof: Boolean(params.acceptVPWithoutHolderProof),
       presentationDefinition: params.presentationDefinition || {
         id: 'FarmerCredentialRequest',
         input_descriptors: [
@@ -248,45 +140,97 @@ export class VerifyService {
       payload: body
     });
 
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-      const data = await res.json();
-      return data;
-    } catch {
-      return {
-        requestId: 'req_' + crypto.randomUUID().slice(0, 8),
-        authUrl: 'openid4vp://authorize?client_id=' + (params.clientId || 'playground-verifier')
-      };
-    }
+    const res = await fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(`Inji Verify VP request failed (${res.status}): ${JSON.stringify(data)}`);
+    ProtocolInspector.record({
+      protocol: 'OpenID4VP', step: 'Inji Verify: Authorization request created', actor: 'VERIFIER',
+      direction: 'RESPONSE', endpoint: url, method: 'POST', headers: Object.fromEntries(res.headers.entries()),
+      payload: data, status: res.status, durationMs: Date.now() - start
+    });
+    return data;
   }
 
   public static async getVPRequestJwt(requestId: string): Promise<string> {
-    const url = `${VERIFY_BASE_URL}/vp-request/${requestId}`;
-    try {
-      const res = await fetch(url);
-      return await res.text();
-    } catch {
-      const header = { alg: 'EdDSA', typ: 'JWT', kid: 'did:web:certify-nginx#key-0' };
-      const payload = {
-        iss: 'did:web:certify-nginx',
-        client_id: 'playground-verifier',
-        request_uri: url,
-        response_type: 'vp_token',
-        response_mode: 'direct_post',
-        nonce: crypto.randomBytes(16).toString('hex'),
-        iat: Math.floor(Date.now() / 1000),
-        exp: Math.floor(Date.now() / 1000) + 3600
-      };
-      const headerB64 = SDJWTCrypto.base64UrlEncode(JSON.stringify(header));
-      const payloadB64 = SDJWTCrypto.base64UrlEncode(JSON.stringify(payload));
-      const signingInput = `${headerB64}.${payloadB64}`;
-      const sig = Ed25519Crypto.sign(Buffer.from(signingInput, 'utf-8'), CertifyService.keyPair.privateKeyObject);
-      const sigB64 = SDJWTCrypto.base64UrlEncode(sig);
-      return `${signingInput}.${sigB64}`;
+    const url = `${VERIFY_BASE_URL}/vp-request/${encodeURIComponent(requestId)}`;
+    const res = await fetch(url);
+    const jwt = await res.text();
+    if (!res.ok) throw new Error(`Inji Verify request JWT failed (${res.status}): ${jwt.slice(0, 300)}`);
+    ProtocolInspector.record({
+      protocol: 'OpenID4VP', step: 'Wallet retrieves signed authorization request', actor: 'WALLET',
+      direction: 'REQUEST', endpoint: url, method: 'GET', headers: { 'Accept': 'application/jwt' }, payload: null
+    });
+    ProtocolInspector.record({
+      protocol: 'OpenID4VP', step: 'Inji Verify returns signed authorization request', actor: 'VERIFIER',
+      direction: 'RESPONSE', endpoint: url, method: 'GET', headers: Object.fromEntries(res.headers.entries()),
+      payload: { jwt }, status: res.status
+    });
+    return jwt;
+  }
+
+  public static async submitVP(responseUri: string, state: string, vpToken: any, presentationSubmission: any,
+    directUpstream = false): Promise<any> {
+    const expected = new URL(`${VERIFY_BASE_URL}/vp-submission/direct-post`);
+    const target = new URL(responseUri);
+    const directBase = process.env.VERIFY_DIRECT_URL;
+    const directExpected = directBase ? new URL(`${directBase}/vp-submission/direct-post`) : null;
+    if (target.pathname !== expected.pathname || target.host !== expected.host) {
+      // Verify may advertise its public URL while this backend reaches it over the Compose network.
+      const publicUrl = new URL(process.env.VERIFY_PUBLIC_URL || 'http://localhost:8095/v1/verify');
+      const targetIsDirect = directUpstream && directExpected && target.pathname === directExpected.pathname &&
+        (target.host === directExpected.host || target.host === publicUrl.host);
+      if (!targetIsDirect && (target.host !== publicUrl.host || target.pathname !== `${publicUrl.pathname}/vp-submission/direct-post`)) {
+        throw new Error(`Refusing VP submission to unexpected verifier response URI: ${responseUri}`);
+      }
     }
+    const url = `${directUpstream && directBase ? directBase : VERIFY_BASE_URL}/vp-submission/direct-post`;
+    const start = Date.now();
+    const form = new URLSearchParams({
+      state,
+      vp_token: JSON.stringify(vpToken),
+      presentation_submission: JSON.stringify(presentationSubmission)
+    });
+    ProtocolInspector.record({ protocol: 'OpenID4VP', step: 'Wallet sends VP token by direct_post', actor: 'WALLET',
+      direction: 'REQUEST', endpoint: url, method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      payload: { state, credentialCount: vpToken.verifiableCredential?.length || 0 } });
+    const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form });
+    const raw = await response.text();
+    let data: any;
+    try { data = JSON.parse(raw); } catch { data = raw; }
+    ProtocolInspector.record({ protocol: 'OpenID4VP', step: 'Inji Verify VP submission response', actor: 'VERIFIER',
+      direction: 'RESPONSE', endpoint: url, method: 'POST', headers: Object.fromEntries(response.headers.entries()),
+      payload: data, status: response.status, durationMs: Date.now() - start });
+    if (!response.ok) {
+      const error: any = new Error(`Inji Verify rejected VP submission (${response.status}): ${JSON.stringify(data)}`);
+      error.nonceRejected = response.headers.get('x-playground-nonce-guard') === 'rejected';
+      error.rejectionLayer = error.nonceRejected ? 'PLAYGROUND_NONCE_GATEWAY' : 'INJI_VERIFY';
+      throw error;
+    }
+    return data;
+  }
+
+  public static async getVPResult(transactionId: string): Promise<any> {
+    const url = `${VERIFY_BASE_URL}/vp-result/${encodeURIComponent(transactionId)}`;
+    const response = await fetch(url);
+    const data = await response.json();
+    if (!response.ok) throw new Error(`Inji Verify VP result failed (${response.status}): ${JSON.stringify(data)}`);
+    ProtocolInspector.record({ protocol: 'OpenID4VP', step: 'Inji Verify verified VP result', actor: 'VERIFIER',
+      direction: 'RESPONSE', endpoint: url, method: 'GET', headers: Object.fromEntries(response.headers.entries()),
+      payload: data, status: response.status });
+    return data;
+  }
+
+  public static async getMobileAlphaVPResult(transactionId: string): Promise<any> {
+    const base = (process.env.VERIFY_ALPHA_URL || 'http://verify-gateway-alpha:8080/v1/verify').replace(/\/$/, '');
+    const url = `${base}/vp-result/${encodeURIComponent(transactionId)}`;
+    const response = await fetch(url);
+    const data = await response.json();
+    if (!response.ok) throw new Error(`Inji Verify 1.0 alpha VP result failed (${response.status}): ${JSON.stringify(data)}`);
+    ProtocolInspector.record({ protocol: 'OpenID4VP', step: 'Inji Verify 1.0 alpha verified VP result', actor: 'VERIFIER',
+      direction: 'RESPONSE', endpoint: url, method: 'GET', headers: Object.fromEntries(response.headers.entries()),
+      payload: data, status: response.status });
+    return data;
   }
 }

@@ -1,0 +1,38 @@
+diff --git a/kotlin/openID4VP/src/commonMain/kotlin/io/mosip/openID4VP/authorizationResponse/unsignedVPToken/types/ldp/UnsignedLdpVPTokenBuilder.kt b/kotlin/openID4VP/src/commonMain/kotlin/io/mosip/openID4VP/authorizationResponse/unsignedVPToken/types/ldp/UnsignedLdpVPTokenBuilder.kt
+index 0ad2411..29ccf76 100644
+--- a/kotlin/openID4VP/src/commonMain/kotlin/io/mosip/openID4VP/authorizationResponse/unsignedVPToken/types/ldp/UnsignedLdpVPTokenBuilder.kt
++++ b/kotlin/openID4VP/src/commonMain/kotlin/io/mosip/openID4VP/authorizationResponse/unsignedVPToken/types/ldp/UnsignedLdpVPTokenBuilder.kt
+@@ -205,10 +205,17 @@ internal class UnsignedLdpVPTokenBuilder(
+         }
+ 
+         internal fun sanitizeHolderId(holderId: String): String {
+-            return holderId
++            val normalized = holderId
+                 .replace("+", "-")
+                 .replace("/", "_")
+-                .replace("=", "") + "#0"
++                .replace("=", "")
++            val fragmentCount = normalized.count { it == '#' }
++            if (fragmentCount > 1 || (fragmentCount == 1 && !normalized.endsWith("#0"))) {
++                throw OpenID4VPExceptions.InvalidData(
++                    "Holder ID has an unsupported key fragment", className
++                )
++            }
++            return if (fragmentCount == 1) normalized else "$normalized#0"
+         }
+     }
+ }
+diff --git a/kotlin/openID4VP/src/commonTest/kotlin/io/mosip/openID4VP/authorizationResponse/unsignedVPToken/types/ldp/UnsignedLdpVPTokenBuilderTest.kt b/kotlin/openID4VP/src/commonTest/kotlin/io/mosip/openID4VP/authorizationResponse/unsignedVPToken/types/ldp/UnsignedLdpVPTokenBuilderTest.kt
+index e9f53e2..c66deb4 100644
+--- a/kotlin/openID4VP/src/commonTest/kotlin/io/mosip/openID4VP/authorizationResponse/unsignedVPToken/types/ldp/UnsignedLdpVPTokenBuilderTest.kt
++++ b/kotlin/openID4VP/src/commonTest/kotlin/io/mosip/openID4VP/authorizationResponse/unsignedVPToken/types/ldp/UnsignedLdpVPTokenBuilderTest.kt
+@@ -364,5 +364,9 @@ class UnsignedLdpVPTokenBuilderTest {
+         assertEquals("abc-def_ghi#0", UnsignedLdpVPTokenBuilder.sanitizeHolderId("abc+def/ghi"))
+         assertEquals("nodid#0", UnsignedLdpVPTokenBuilder.sanitizeHolderId("nodid"))
+         assertEquals("base64url#0", UnsignedLdpVPTokenBuilder.sanitizeHolderId("base64url=="))
++        assertEquals("did:jwk:abc#0", UnsignedLdpVPTokenBuilder.sanitizeHolderId("did:jwk:abc#0"))
++        assertFailsWith<OpenID4VPExceptions.InvalidData> {
++            UnsignedLdpVPTokenBuilder.sanitizeHolderId("did:jwk:abc#0#0")
++        }
+     }
+ }

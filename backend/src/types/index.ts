@@ -9,7 +9,7 @@ export interface SystemHealth {
 export type CredentialFormat = 'ldp_vc' | 'vc+sd-jwt' | 'mso_mdoc';
 
 export type IssuerImplementation = 'INJI_CERTIFY' | 'MOCK_EXTERNAL_OID4VCI';
-export type WalletImplementation = 'INJI_WEB' | 'INJI_MOBILE' | 'MOCK_EXTERNAL_WALLET';
+export type WalletImplementation = 'INJI_WEB' | 'INJI_MOBILE' | 'MOCK_EXTERNAL_WALLET' | 'NOT_EXERCISED';
 export type VerifierImplementation = 'INJI_VERIFY' | 'MOCK_EXTERNAL_OID4VP';
 
 export type TamperScenario = 
@@ -23,6 +23,7 @@ export type TamperScenario =
 
 export interface ProtocolLogEntry {
   id: string;
+  flowId?: string;
   timestamp: string;
   protocol: 'OpenID4VCI' | 'OpenID4VP' | 'W3C_VC' | 'SD_JWT' | 'MDOC' | 'SYSTEM';
   step: string;
@@ -59,10 +60,12 @@ export interface MatrixRunResult {
   format: CredentialFormat;
   proofType: string;
   tamperScenario: TamperScenario;
+  executionMode?: 'DIRECT_API' | 'LOCAL_REFERENCE_WALLET_OID4VCI_OID4VP' |
+    'LOCAL_REFERENCE_WALLET_OID4VP' | 'LOCAL_REFERENCE_CRYPTO';
   issuanceSuccess: boolean;
   verificationSuccess: boolean;
   expectedOutcome: 'SUCCESS' | 'REJECT';
-  actualOutcome: 'SUCCESS' | 'REJECT';
+  actualOutcome: 'SUCCESS' | 'REJECT' | 'ERROR';
   passed: boolean;
   latencyMs: number;
   errorDetail?: string;
@@ -90,20 +93,20 @@ export interface IssuedCredentialPayload {
 
 export interface VerificationResultPayload {
   valid: boolean;
-  status: 'VALID' | 'INVALID' | 'EXPIRED' | 'TAMPERED';
+  status: 'VALID' | 'INVALID' | 'EXPIRED' | 'TAMPERED' | 'REVOKED';
   format: CredentialFormat;
   verifier: VerifierImplementation;
   cryptographicCheck: {
-    signatureValid: boolean;
+    signatureValid: boolean | null;
     signatureSuite: string;
     issuerDid: string;
-    tamperDetected: boolean;
+    tamperDetected: boolean | null;
     message?: string;
   };
   claimsCheck: {
-    issuerTrusted: boolean;
-    subjectMatched: boolean;
-    notExpired: boolean;
+    issuerTrusted: boolean | null;
+    subjectMatched: boolean | null;
+    notExpired: boolean | null;
     claims: Record<string, any>;
   };
   rawVpToken?: any;
